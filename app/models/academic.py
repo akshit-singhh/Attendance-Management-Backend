@@ -1,3 +1,5 @@
+#app/models/academic.py
+
 from sqlmodel import SQLModel, Field, Relationship
 from typing import Optional, List
 from datetime import date
@@ -57,3 +59,18 @@ class StudentSubjectMap(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     student_id: int = Field(foreign_key="user.id") # Links to Student profile
     course_offering_id: int = Field(foreign_key="courseoffering.id")
+    
+from pydantic import BaseModel
+from datetime import date
+
+class TermCreate(BaseModel):
+    name: str
+    start_date: date
+    end_date: date
+    is_active: bool = True
+
+class CourseOfferingCreate(BaseModel):
+    term_id: int
+    section_id: int
+    subject_id: int
+    teacher_id: int
