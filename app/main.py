@@ -32,6 +32,7 @@ app.mount("/static/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 # Register Routers
 app.include_router(auth.router, prefix=f"{settings.API_V1_STR}/auth", tags=["Authentication"])
+app.include_router(auth.router, prefix=f"{settings.API_V1_STR}/web/auth", tags=["Authentication"])
 
 app.include_router(
     mobile_attendance.router, 

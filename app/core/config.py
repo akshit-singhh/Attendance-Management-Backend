@@ -11,6 +11,10 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     
+    ADMIN_EMAIL: str = "admin@gbu.ac.in"
+    ADMIN_PASSWORD: str = "GBU123"
+    ADMIN_NAME: str = "System Administrator"
+    
     # PostgreSQL Connection String
     # Format: postgresql+asyncpg://user:password@localhost:5432/dbname
     DATABASE_URL: str 
