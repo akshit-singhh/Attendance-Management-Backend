@@ -1,36 +1,36 @@
-#app/seed.py
-
 import asyncio
 from datetime import date
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.database import engine
 from app.core.security import get_password_hash
-from app.models.user import User, RoleEnum, StudentProfile
+from app.models.user import User, RoleEnum, ScopeTypeEnum, RoleAssignment, StudentProfile
 from app.models.academic import Program, Batch, AcademicTerm, Section, Subject, CourseOffering, StudentSubjectMap
 
 async def seed_data():
     async with AsyncSession(engine, expire_on_commit=False) as db:
-        print("Seeding database...")
+        print("Seeding database for v0.2...")
 
-        # 1. Create a Teacher
-        teacher = User(
-            email="teacher@college.edu",
-            hashed_password=get_password_hash("password123"),
-            full_name="Prof. Alan Turing",
-            role=RoleEnum.TEACHER
-        )
-        db.add(teacher)
+        password_hash = get_password_hash("password123")
 
-        # 2. Create a Student
-        student_user = User(
-            email="student@college.edu",
-            hashed_password=get_password_hash("password123"),
-            full_name="Alice Smith",
-            role=RoleEnum.STUDENT
-        )
-        db.add(student_user)
+        # 1. Create Users
+        teacher = User(email="teacher@college.edu", hashed_password=password_hash, full_name="Prof. Alan Turing")
+        student_user = User(email="student@college.edu", hashed_password=password_hash, full_name="Alice Smith")
+        admin_user = User(email="admin@college.edu", hashed_password=password_hash, full_name="System Admin")
+        coord_user = User(email="coordinator@college.edu", hashed_password=password_hash, full_name="Program Coordinator")
+
+        db.add_all([teacher, student_user, admin_user, coord_user])
         await db.commit() # Commit to generate IDs
+
+        # 2. Assign Roles (The v0.2 Way)
+        roles = [
+            RoleAssignment(user_id=admin_user.id, role=RoleEnum.ADMIN, scope_type=ScopeTypeEnum.UNIVERSITY),
+            RoleAssignment(user_id=teacher.id, role=RoleEnum.TEACHER, scope_type=ScopeTypeEnum.ASSIGNMENT),
+            RoleAssignment(user_id=student_user.id, role=RoleEnum.STUDENT, scope_type=ScopeTypeEnum.PROGRAM),
+            RoleAssignment(user_id=coord_user.id, role=RoleEnum.COORDINATOR, scope_type=ScopeTypeEnum.PROGRAM)
+        ]
+        db.add_all(roles)
+        await db.commit()
 
         # 3. Create the Academic Structure
         program = Program(name="B.Tech Computer Science", total_semesters=8)
@@ -79,9 +79,10 @@ async def seed_data():
         await db.commit()
 
         print("✅ Seeding complete!")
+        print(f"Admin Login: admin@college.edu / password123")
+        print(f"Coordinator Login: coordinator@college.edu / password123")
         print(f"Teacher Login: teacher@college.edu / password123")
-        print(f"Active Term ID: {term.id}")
-        print(f"Course Offering ID: {offering.id}")
+        print(f"Student Login: student@college.edu / password123")
 
 if __name__ == "__main__":
     asyncio.run(seed_data())

@@ -1,12 +1,14 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlmodel import select
+from sqlalchemy.orm import selectinload
 
-from typing import List
+from typing import List, Optional
 from pydantic import BaseModel
 
 from app.core.database import get_session
-from app.api.deps import require_hod
+from app.core.security import get_password_hash
+from app.api.deps import require_hod, require_admin
 from app.models.academic import (
     AcademicTerm, 
     CourseOffering, 
@@ -16,7 +18,7 @@ from app.models.academic import (
     Section, 
     StudentSubjectMap
 )
-from app.models.user import User, RoleEnum
+from app.models.user import User, RoleEnum, RoleAssignment, ScopeTypeEnum
 
 
 # --- SCHEMAS ---
@@ -38,18 +40,141 @@ class CourseOfferingListResponse(BaseModel):
     subject_name: str
     teacher_name: str
 
+class UserCreate(BaseModel):
+    email: str
+    full_name: str
+    password: str
+    role: RoleEnum
+    scope_type: ScopeTypeEnum
+    scope_id: Optional[int] = None
+
+class UserResponse(BaseModel):
+    id: int
+    email: str
+    full_name: str
+    is_active: bool
+    role: RoleEnum
+    scope_type: ScopeTypeEnum
+    scope_id: Optional[int]
+
+
 router = APIRouter()
 
-# --- CREATION ENDPOINTS ---
+# --- ADMIN: USER MANAGEMENT ---
 
-@router.post("/terms", status_code=status.HTTP_201_CREATED)
+@router.post("/users", status_code=status.HTTP_201_CREATED, response_model=UserResponse, tags=["Admin - User Provisioning"])
+async def create_user(
+    payload: UserCreate,
+    admin_id: int = Depends(require_admin),
+    db: AsyncSession = Depends(get_session)
+):
+    existing_user_stmt = select(User).where(User.email == payload.email)
+    existing_user = (await db.exec(existing_user_stmt)).first()
+    if existing_user:
+        raise HTTPException(status_code=400, detail="User with this email already exists.")
+
+    new_user = User(
+        email=payload.email,
+        full_name=payload.full_name,
+        hashed_password=get_password_hash(payload.password),
+        is_active=True
+    )
+    db.add(new_user)
+    await db.commit()
+    await db.refresh(new_user)
+
+    role_assignment = RoleAssignment(
+        user_id=new_user.id,
+        role=payload.role,
+        scope_type=payload.scope_type,
+        scope_id=payload.scope_id
+    )
+    db.add(role_assignment)
+    await db.commit()
+
+    return UserResponse(
+        id=new_user.id,
+        email=new_user.email,
+        full_name=new_user.full_name,
+        is_active=new_user.is_active,
+        role=role_assignment.role,
+        scope_type=role_assignment.scope_type,
+        scope_id=role_assignment.scope_id
+    )
+
+@router.get("/users", response_model=List[UserResponse], tags=["Admin - User Provisioning"])
+async def list_users(
+    admin_id: int = Depends(require_admin),
+    db: AsyncSession = Depends(get_session)
+):
+    statement = select(User).options(selectinload(User.role_assignments)).order_by(User.full_name)
+    result = await db.exec(statement)
+    
+    users = []
+    for user in result.all():
+        primary_assignment = user.role_assignments[0] if user.role_assignments else None
+        
+        users.append(UserResponse(
+            id=user.id,
+            email=user.email,
+            full_name=user.full_name,
+            is_active=user.is_active,
+            role=primary_assignment.role if primary_assignment else RoleEnum.STUDENT,
+            scope_type=primary_assignment.scope_type if primary_assignment else ScopeTypeEnum.UNIVERSITY,
+            scope_id=primary_assignment.scope_id if primary_assignment else None
+        ))
+        
+    return users
+
+@router.patch("/users/{user_id}/deactivate", status_code=status.HTTP_200_OK, tags=["Admin - User Provisioning"])
+async def deactivate_user(
+    user_id: int,
+    admin_id: int = Depends(require_admin),
+    db: AsyncSession = Depends(get_session)
+):
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+        
+    if user.id == admin_id:
+        raise HTTPException(status_code=400, detail="You cannot deactivate your own admin account.")
+
+    user.is_active = False
+    db.add(user)
+    await db.commit()
+    
+    return {"status": "success", "message": f"User {user.email} has been deactivated."}
+
+@router.patch("/users/{user_id}/activate", status_code=status.HTTP_200_OK, tags=["Admin - User Provisioning"])
+async def activate_user(
+    user_id: int,
+    admin_id: int = Depends(require_admin),
+    db: AsyncSession = Depends(get_session)
+):
+    """Restore access for a previously deactivated user."""
+    
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    if user.is_active:
+        return {"status": "success", "message": f"User {user.email} is already active."}
+
+    user.is_active = True
+    db.add(user)
+    await db.commit()
+    
+    return {"status": "success", "message": f"User {user.email} has been reactivated."}
+
+
+# --- HOD: ACADEMIC SETUP ---
+
+@router.post("/terms", status_code=status.HTTP_201_CREATED, tags=["HOD - Academic Setup"])
 async def create_term(
     payload: TermCreate,
     admin_id: int = Depends(require_hod),
     db: AsyncSession = Depends(get_session)
 ):
-    """Create a new academic semester/term."""
-    
     if payload.is_active:
         await db.exec(
             select(AcademicTerm).where(AcademicTerm.is_active == True)
@@ -68,18 +193,21 @@ async def create_term(
     
     return new_term
 
-@router.post("/course-offerings", status_code=status.HTTP_201_CREATED)
+@router.post("/course-offerings", status_code=status.HTTP_201_CREATED, tags=["HOD - Academic Setup"])
 async def assign_teacher_to_class(
     payload: CourseOfferingCreate,
     admin_id: int = Depends(require_hod),
     db: AsyncSession = Depends(get_session)
 ):
-    """Map a Teacher to a Subject and Section for a specific Term."""
-    
     teacher = await db.get(User, payload.teacher_id)
     if not teacher:
         raise HTTPException(status_code=404, detail="User not found.")
-    if teacher.role not in [RoleEnum.TEACHER, RoleEnum.COORDINATOR, RoleEnum.HOD]:
+        
+    role_stmt = select(RoleAssignment).where(RoleAssignment.user_id == teacher.id)
+    role_result = await db.exec(role_stmt)
+    user_roles = [r.role for r in role_result.all()]
+    
+    if not any(r in [RoleEnum.TEACHER, RoleEnum.COORDINATOR, RoleEnum.HOD] for r in user_roles):
         raise HTTPException(status_code=400, detail="The assigned user is not a faculty member.")
 
     term = await db.get(AcademicTerm, payload.term_id)
@@ -112,14 +240,12 @@ async def assign_teacher_to_class(
     
     return {"status": "success", "course_offering_id": offering.id}
 
-@router.post("/enrollments/bulk", status_code=status.HTTP_201_CREATED)
+@router.post("/enrollments/bulk", status_code=status.HTTP_201_CREATED, tags=["HOD - Academic Setup"])
 async def bulk_enroll_students(
     payload: BulkEnrollmentCreate,
     admin_id: int = Depends(require_hod),
     db: AsyncSession = Depends(get_session)
 ):
-    """Enroll multiple students into a single course offering."""
-    
     offering = await db.get(CourseOffering, payload.course_offering_id)
     if not offering:
         raise HTTPException(status_code=404, detail="Course offering not found.")
@@ -127,10 +253,12 @@ async def bulk_enroll_students(
     if not payload.student_ids:
         raise HTTPException(status_code=400, detail="No student IDs provided.")
 
-    valid_students_query = select(User.id).where(
-        User.id.in_(payload.student_ids),
-        User.role == RoleEnum.STUDENT,
-        User.is_active == True
+    valid_students_query = (
+        select(User.id)
+        .join(RoleAssignment)
+        .where(User.id.in_(payload.student_ids))
+        .where(RoleAssignment.role == RoleEnum.STUDENT)
+        .where(User.is_active == True)
     )
     valid_students_result = await db.exec(valid_students_query)
     valid_student_ids = set(valid_students_result.all())
@@ -169,23 +297,21 @@ async def bulk_enroll_students(
         "skipped_duplicates": len(already_enrolled)
     }
 
-# --- DATA FETCHERS FOR FRONTEND DROPDOWNS ---
+# --- HOD: DATA FETCHERS ---
 
-@router.get("/terms", response_model=List[AcademicTerm])
+@router.get("/terms", response_model=List[AcademicTerm], tags=["HOD - Data Fetchers"])
 async def get_all_terms(
     admin_id: int = Depends(require_hod),
     db: AsyncSession = Depends(get_session)
 ):
-    """Fetch all academic terms for the dropdown."""
     result = await db.exec(select(AcademicTerm).order_by(AcademicTerm.start_date.desc()))
     return result.all()
-@router.get("/course-offerings", response_model=List[CourseOfferingListResponse])
+
+@router.get("/course-offerings", response_model=List[CourseOfferingListResponse], tags=["HOD - Data Fetchers"])
 async def get_all_course_offerings(
     admin_id: int = Depends(require_hod),
     db: AsyncSession = Depends(get_session)
 ):
-    """Fetch all course offerings with human-readable names for the enrollment dropdown."""
-    
     statement = (
         select(
             CourseOffering.id,
@@ -203,7 +329,6 @@ async def get_all_course_offerings(
     
     result = await db.exec(statement)
     
-    # Map the raw SQL results into our Pydantic schema
     offerings = []
     for row in result:
         offerings.append(
@@ -218,38 +343,49 @@ async def get_all_course_offerings(
         
     return offerings
 
-@router.get("/subjects", response_model=List[Subject])
+@router.get("/subjects", response_model=List[Subject], tags=["HOD - Data Fetchers"])
 async def get_all_subjects(
     admin_id: int = Depends(require_hod),
     db: AsyncSession = Depends(get_session)
 ):
-    """Fetch all subjects for the dropdown."""
     result = await db.exec(select(Subject).order_by(Subject.name))
     return result.all()
 
-@router.get("/sections", response_model=List[Section])
+@router.get("/sections", response_model=List[Section], tags=["HOD - Data Fetchers"])
 async def get_all_sections(
     admin_id: int = Depends(require_hod),
     db: AsyncSession = Depends(get_session)
 ):
-    """Fetch all sections for the dropdown."""
     result = await db.exec(select(Section).order_by(Section.name))
     return result.all()
 
-@router.get("/faculty", response_model=List[FacultyResponse])
+@router.get("/faculty", response_model=List[FacultyResponse], tags=["HOD - Data Fetchers"])
 async def get_faculty_list(
     admin_id: int = Depends(require_hod),
     db: AsyncSession = Depends(get_session)
 ):
-    """Fetch all active faculty members (Teachers, Coordinators, HODs, Admins)."""
     allowed_roles = [RoleEnum.TEACHER, RoleEnum.COORDINATOR, RoleEnum.HOD, RoleEnum.ADMIN]
     
     statement = (
-        select(User)
-        .where(User.role.in_(allowed_roles))
+        select(User, RoleAssignment.role)
+        .join(RoleAssignment, User.id == RoleAssignment.user_id)
+        .where(RoleAssignment.role.in_(allowed_roles))
         .where(User.is_active == True)
         .order_by(User.full_name)
     )
     
     result = await db.exec(statement)
-    return result.all()
+    
+    faculty_list = []
+    seen_ids = set()
+    for user, role in result:
+        if user.id not in seen_ids:
+            faculty_list.append(FacultyResponse(
+                id=user.id,
+                full_name=user.full_name,
+                email=user.email,
+                role=role
+            ))
+            seen_ids.add(user.id)
+            
+    return faculty_list

@@ -1,8 +1,8 @@
-"""Initial schema
+"""v0.2 SRS Schema
 
-Revision ID: 0d1d97053b2e
+Revision ID: 386efba06a5d
 Revises: 
-Create Date: 2026-06-13 23:43:52.152563
+Create Date: 2026-09-23 18:22:11.014085
 
 """
 from typing import Sequence, Union
@@ -13,7 +13,7 @@ import sqlmodel
 
 
 # revision identifiers, used by Alembic.
-revision: str = '0d1d97053b2e'
+revision: str = '386efba06a5d'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -50,7 +50,6 @@ def upgrade() -> None:
     sa.Column('email', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('hashed_password', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('full_name', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
-    sa.Column('role', sa.Enum('ADMIN', 'DEAN', 'HOD', 'COORDINATOR', 'TEACHER', 'STUDENT', name='roleenum'), nullable=False),
     sa.Column('is_active', sa.Boolean(), nullable=False),
     sa.Column('fcm_token', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
@@ -67,16 +66,25 @@ def upgrade() -> None:
     )
     op.create_table('refreshtoken',
     sa.Column('id', sa.Integer(), nullable=False),
-    sa.Column('user_id', sa.Integer(), nullable=False),
     sa.Column('token', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+    sa.Column('user_id', sa.Integer(), nullable=False),
     sa.Column('expires_at', sa.DateTime(), nullable=False),
-    sa.Column('is_revoked', sa.Boolean(), nullable=False),
     sa.Column('created_at', sa.DateTime(), nullable=False),
+    sa.Column('is_revoked', sa.Boolean(), nullable=False),
     sa.ForeignKeyConstraint(['user_id'], ['user.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_refreshtoken_token'), 'refreshtoken', ['token'], unique=True)
     op.create_index(op.f('ix_refreshtoken_user_id'), 'refreshtoken', ['user_id'], unique=False)
+    op.create_table('roleassignment',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('user_id', sa.Integer(), nullable=False),
+    sa.Column('role', sa.Enum('ADMIN', 'DEAN', 'HOD', 'COORDINATOR', 'TEACHER', 'STUDENT', name='roleenum'), nullable=False),
+    sa.Column('scope_type', sa.Enum('UNIVERSITY', 'SCHOOL', 'DEPARTMENT', 'PROGRAM', 'ASSIGNMENT', name='scopetypeenum'), nullable=False),
+    sa.Column('scope_id', sa.Integer(), nullable=True),
+    sa.ForeignKeyConstraint(['user_id'], ['user.id'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
     op.create_table('section',
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('name', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
@@ -109,19 +117,24 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['term_id'], ['academicterm.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
-    op.create_table('attendancerecord',
+    op.create_table('attendancesession',
     sa.Column('id', sa.Integer(), nullable=False),
-    sa.Column('student_id', sa.Integer(), nullable=False),
+    sa.Column('session_uuid', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('course_offering_id', sa.Integer(), nullable=False),
+    sa.Column('teacher_id', sa.Integer(), nullable=False),
     sa.Column('date', sa.Date(), nullable=False),
-    sa.Column('status', sa.Enum('PRESENT', 'ABSENT', 'LEAVE', name='attendancestatus'), nullable=False),
-    sa.Column('marked_by_id', sa.Integer(), nullable=False),
-    sa.Column('is_overridden', sa.Boolean(), nullable=False),
+    sa.Column('duration_periods', sa.Integer(), nullable=False),
+    sa.Column('mode', sa.Enum('MANUAL', name='sessionmode'), nullable=False),
+    sa.Column('is_held', sa.Boolean(), nullable=False),
+    sa.Column('reason_not_held', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+    sa.Column('status', sa.Enum('DRAFT', 'SUBMITTED', 'CANCELLED', 'CORRECTION_REQUESTED', name='sessionstatus'), nullable=False),
+    sa.Column('created_at', sa.DateTime(), nullable=False),
+    sa.Column('submitted_at', sa.DateTime(), nullable=True),
     sa.ForeignKeyConstraint(['course_offering_id'], ['courseoffering.id'], ),
-    sa.ForeignKeyConstraint(['marked_by_id'], ['user.id'], ),
-    sa.ForeignKeyConstraint(['student_id'], ['user.id'], ),
+    sa.ForeignKeyConstraint(['teacher_id'], ['user.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
+    op.create_index(op.f('ix_attendancesession_session_uuid'), 'attendancesession', ['session_uuid'], unique=True)
     op.create_table('studentsubjectmap',
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('student_id', sa.Integer(), nullable=False),
@@ -130,12 +143,53 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['student_id'], ['user.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
+    op.create_table('substitutegrant',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('substitute_teacher_id', sa.Integer(), nullable=False),
+    sa.Column('course_offering_id', sa.Integer(), nullable=False),
+    sa.Column('start_date', sa.Date(), nullable=False),
+    sa.Column('end_date', sa.Date(), nullable=False),
+    sa.Column('granted_by_id', sa.Integer(), nullable=False),
+    sa.ForeignKeyConstraint(['course_offering_id'], ['courseoffering.id'], ),
+    sa.ForeignKeyConstraint(['granted_by_id'], ['user.id'], ),
+    sa.ForeignKeyConstraint(['substitute_teacher_id'], ['user.id'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_table('attendancerecord',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('record_uuid', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+    sa.Column('session_id', sa.Integer(), nullable=False),
+    sa.Column('student_id', sa.Integer(), nullable=False),
+    sa.Column('status', sa.Enum('PRESENT', 'ABSENT', name='attendancestatus'), nullable=False),
+    sa.Column('captured_at', sa.DateTime(), nullable=False),
+    sa.Column('synced_at', sa.DateTime(), nullable=False),
+    sa.Column('is_overridden', sa.Boolean(), nullable=False),
+    sa.Column('is_flagged', sa.Boolean(), nullable=False),
+    sa.Column('flag_reason', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+    sa.ForeignKeyConstraint(['session_id'], ['attendancesession.id'], ),
+    sa.ForeignKeyConstraint(['student_id'], ['user.id'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_attendancerecord_record_uuid'), 'attendancerecord', ['record_uuid'], unique=True)
+    op.create_table('correctionrequest',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('session_id', sa.Integer(), nullable=False),
+    sa.Column('requested_by_id', sa.Integer(), nullable=False),
+    sa.Column('reason', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+    sa.Column('status', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+    sa.Column('approved_by_id', sa.Integer(), nullable=True),
+    sa.Column('resolved_at', sa.DateTime(), nullable=True),
+    sa.ForeignKeyConstraint(['approved_by_id'], ['user.id'], ),
+    sa.ForeignKeyConstraint(['requested_by_id'], ['user.id'], ),
+    sa.ForeignKeyConstraint(['session_id'], ['attendancesession.id'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
     op.create_table('attendanceauditlog',
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('attendance_record_id', sa.Integer(), nullable=False),
     sa.Column('changed_by_id', sa.Integer(), nullable=False),
-    sa.Column('previous_status', sa.Enum('PRESENT', 'ABSENT', 'LEAVE', name='attendancestatus'), nullable=False),
-    sa.Column('new_status', sa.Enum('PRESENT', 'ABSENT', 'LEAVE', name='attendancestatus'), nullable=False),
+    sa.Column('previous_status', sa.Enum('PRESENT', 'ABSENT', name='attendancestatus'), nullable=False),
+    sa.Column('new_status', sa.Enum('PRESENT', 'ABSENT', name='attendancestatus'), nullable=False),
     sa.Column('reason', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('changed_at', sa.DateTime(), nullable=False),
     sa.ForeignKeyConstraint(['attendance_record_id'], ['attendancerecord.id'], ),
@@ -149,12 +203,18 @@ def downgrade() -> None:
     """Downgrade schema."""
     # ### commands auto generated by Alembic - please adjust! ###
     op.drop_table('attendanceauditlog')
-    op.drop_table('studentsubjectmap')
+    op.drop_table('correctionrequest')
+    op.drop_index(op.f('ix_attendancerecord_record_uuid'), table_name='attendancerecord')
     op.drop_table('attendancerecord')
+    op.drop_table('substitutegrant')
+    op.drop_table('studentsubjectmap')
+    op.drop_index(op.f('ix_attendancesession_session_uuid'), table_name='attendancesession')
+    op.drop_table('attendancesession')
     op.drop_table('courseoffering')
     op.drop_index(op.f('ix_studentprofile_roll_number'), table_name='studentprofile')
     op.drop_table('studentprofile')
     op.drop_table('section')
+    op.drop_table('roleassignment')
     op.drop_index(op.f('ix_refreshtoken_user_id'), table_name='refreshtoken')
     op.drop_index(op.f('ix_refreshtoken_token'), table_name='refreshtoken')
     op.drop_table('refreshtoken')
