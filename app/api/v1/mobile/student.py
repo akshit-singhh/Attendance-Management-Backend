@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlmodel import select, func
 from sqlalchemy import case
@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from app.core.database import get_session
 from app.api.deps import require_student
 from app.models.academic import CourseOffering, Subject, StudentSubjectMap, AcademicTerm
-from app.models.attendance import AttendanceRecord
+from app.models.attendance import AttendanceRecord, AttendanceSession, SessionStatus, AttendanceStatus
 from app.models.user import User
 
 router = APIRouter()
@@ -19,8 +19,8 @@ class SubjectAttendanceHistory(BaseModel):
     subject_name: str
     course_code: str
     teacher_name: str
-    classes_held: int
-    classes_attended: int
+    periods_held: int
+    periods_attended: int
     percentage: float
     standing: str
 
@@ -33,36 +33,60 @@ class StudentDashboardResponse(BaseModel):
 
 # --- ENDPOINTS ---
 
-@router.get("/dashboard", response_model=StudentDashboardResponse)
+@router.get("/dashboard", response_model=StudentDashboardResponse, tags=["Mobile Student API"])
 async def get_student_dashboard(
     term_id: int,
     student_id: int = Depends(require_student),
     db: AsyncSession = Depends(get_session)
 ):
-    """Fetches the complete attendance breakdown for a student in a specific term."""
+    """Fetches the aggregated attendance breakdown applying the v0.2 calculation rules."""
     
     term = await db.get(AcademicTerm, term_id)
     if not term:
         raise HTTPException(status_code=404, detail="Term not found")
 
-    # Advanced SQL Aggregation: Group by Subject and calculate percentages directly in Postgres
+    # Advanced SQL Aggregation: Enforce duration weighting and exclude "class not held" sessions
     statement = (
         select(
             Subject.name.label("subject_name"),
             Subject.course_code,
             User.full_name.label("teacher_name"),
-            func.count(AttendanceRecord.id).label("classes_held"),
+            # Total periods held (Weighting the duration)
             func.sum(
-                case((AttendanceRecord.status == "PRESENT", 1), else_=0)
-            ).label("classes_attended")
+                case(
+                    (
+                        (AttendanceSession.is_held == True) & 
+                        (AttendanceSession.status == SessionStatus.SUBMITTED), 
+                        AttendanceSession.duration_periods
+                    ),
+                    else_=0
+                )
+            ).label("periods_held"),
+            # Total periods attended (Weighting the duration if PRESENT)
+            func.sum(
+                case(
+                    (
+                        (AttendanceSession.is_held == True) & 
+                        (AttendanceSession.status == SessionStatus.SUBMITTED) & 
+                        (AttendanceRecord.status == AttendanceStatus.PRESENT), 
+                        AttendanceSession.duration_periods
+                    ),
+                    else_=0
+                )
+            ).label("periods_attended")
         )
         .select_from(CourseOffering)
         .join(Subject, CourseOffering.subject_id == Subject.id)
         .join(User, CourseOffering.teacher_id == User.id) # The Teacher
         .join(StudentSubjectMap, StudentSubjectMap.course_offering_id == CourseOffering.id)
+        # Outer joins ensure we still return subjects even if 0 classes have been held so far
+        .outerjoin(
+            AttendanceSession, 
+            AttendanceSession.course_offering_id == CourseOffering.id
+        )
         .outerjoin(
             AttendanceRecord, 
-            (AttendanceRecord.course_offering_id == CourseOffering.id) & 
+            (AttendanceRecord.session_id == AttendanceSession.id) & 
             (AttendanceRecord.student_id == student_id)
         )
         .where(StudentSubjectMap.student_id == student_id)
@@ -79,28 +103,28 @@ async def get_student_dashboard(
     highest_subject = "N/A"
     critical_subjects = 0
 
-    # Process the SQL results into our Python schemas
+    # V1 Proposed Minimum Threshold
+    WARNING_THRESHOLD = 75.0
+
     for row in results:
-        classes_held = row.classes_held or 0
-        classes_attended = row.classes_attended or 0
+        # Handle SQLAlchemy returning None for sums when no sessions exist yet
+        periods_held = int(row.periods_held) if row.periods_held else 0
+        periods_attended = int(row.periods_attended) if row.periods_attended else 0
         
-        total_held += classes_held
-        total_attended += classes_attended
+        total_held += periods_held
+        total_attended += periods_attended
         
-        # Calculate percentage for this specific subject
-        percentage = (classes_attended / classes_held * 100) if classes_held > 0 else 100.0
+        percentage = (periods_attended / periods_held * 100) if periods_held > 0 else 100.0
         
-        # Determine standing based on your design rules
         if percentage >= 85:
             standing = "Excellent"
-        elif percentage >= 75:
+        elif percentage >= WARNING_THRESHOLD:
             standing = "Good Standing"
         else:
             standing = "Low Attendance"
             critical_subjects += 1
             
-        # Track highest score
-        if percentage >= highest_score and classes_held > 0:
+        if percentage >= highest_score and periods_held > 0:
             highest_score = percentage
             highest_subject = f"{row.subject_name} ({percentage:.1f}%)"
 
@@ -109,14 +133,13 @@ async def get_student_dashboard(
                 subject_name=row.subject_name,
                 course_code=row.course_code,
                 teacher_name=row.teacher_name,
-                classes_held=classes_held,
-                classes_attended=classes_attended,
+                periods_held=periods_held,
+                periods_attended=periods_attended,
                 percentage=round(percentage, 1),
                 standing=standing
             )
         )
 
-    # Calculate overall metrics
     overall_percentage = (total_attended / total_held * 100) if total_held > 0 else 100.0
     risk_level = f"{critical_subjects} Critical" if critical_subjects > 0 else "Safe"
 

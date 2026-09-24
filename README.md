@@ -408,10 +408,3 @@ It is a complete starting point for a campus attendance system and is organized 
 - Log in with the configured admin or create users through the admin flows
 
 ---
-
-If you want, I can also create a second version of this README tailored specifically for:
-
-- a developer onboarding guide
-- a GitHub project landing page
-- an AI agent context file that is more structured for LLM understanding
-- a shorter "quickstart + architecture" version for internal teams

@@ -113,3 +113,21 @@ class CourseScheduleResponse(BaseModel):
     subject_name: str
     subject_code: str
     section_name: str
+    
+class LeaveStatus(str, Enum):
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+class LeaveRequest(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    student_id: int = Field(foreign_key="user.id")
+    
+    start_date: date
+    end_date: date
+    reason: str
+    document_url: str
+    status: LeaveStatus = Field(default=LeaveStatus.PENDING)
+    
+    reviewed_by_id: Optional[int] = Field(default=None, foreign_key="user.id")
+    applied_on: datetime = Field(default_factory=datetime.utcnow)

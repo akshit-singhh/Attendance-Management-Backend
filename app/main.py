@@ -10,27 +10,29 @@ from app.api.v1.mobile import attendance as mobile_attendance
 from app.api.v1.mobile import student as mobile_student
 from app.api.v1.web import management as web_management
 from app.api.v1.web import corrections as web_corrections
+from app.api.v1.web import leaves as web_leaves
+from app.api.v1.mobile import leaves as mobile_leaves
 
-# Import your admin initialization script
 from app.create_admin import init_admin
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # This runs exactly once when Uvicorn starts
+    """
+    Lifecycle manager for FastAPI. 
+    Runs startup tasks before the server starts accepting requests.
+    """
     try:
         await init_admin()
     except Exception as e:
         print(f"Admin initialization skipped/failed: {e}")
     
-    yield # Server runs here
-    
-    # This runs when Uvicorn shuts down (nothing to clean up for now)
+    yield 
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.VERSION,
     openapi_url=f"{settings.API_V1_STR}/openapi.json",
-    lifespan=lifespan # Attach the startup event
+    lifespan=lifespan
 )
 
 # CORS configuration - strict in production, open for local dev
@@ -42,11 +44,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Mount static directory for local file uploads
 os.makedirs("uploads", exist_ok=True)
 app.mount("/static/uploads", StaticFiles(directory="uploads"), name="uploads")
 
-# Register Routers
-app.include_router(auth.router, prefix=f"{settings.API_V1_STR}/auth", tags=["Authentication"])
+
+# --- API ROUTER REGISTRATION ---
+
+app.include_router(
+    auth.router, 
+    prefix=f"{settings.API_V1_STR}/auth", 
+    tags=["Authentication"]
+)
 
 app.include_router(
     mobile_attendance.router,
@@ -66,17 +75,22 @@ app.include_router(
     tags=["Web Admin API"]
 )
 
-# Disabled for V1
-# app.include_router(
-#     mobile_leaves.router,
-#     prefix=f"{settings.API_V1_STR}/mobile/leaves",
-#     tags=["Mobile Student API"]
-# )
-
 app.include_router(
     web_management.router,
     prefix=f"{settings.API_V1_STR}/web/management",
     tags=["Web Admin API"]
+)
+
+app.include_router(
+    web_leaves.router,
+    prefix=f"{settings.API_V1_STR}/web/leaves",
+    tags=["Web Admin API"]
+)
+
+app.include_router(
+    mobile_leaves.router,
+    prefix=f"{settings.API_V1_STR}/mobile/leaves",
+    tags=["Mobile Student API"]
 )
 
 @app.get("/")

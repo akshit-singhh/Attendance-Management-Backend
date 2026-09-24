@@ -10,3 +10,4 @@ htmlcov/
 .idea/
 *.sqlite3
 *.db
+run_mailpit.py

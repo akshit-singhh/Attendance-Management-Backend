@@ -10,6 +10,14 @@ from app.core.config import settings
 from app.core.security import verify_password, create_access_token, create_refresh_token
 from app.models.user import User, RefreshToken
 from app.models.auth import TokenResponse, RefreshTokenRequest
+from app.api.deps import get_current_user
+from app.core.security import get_password_hash
+
+
+import random
+from fastapi import BackgroundTasks
+from app.models.user import PasswordResetOTP
+from app.services.email_service import send_otp_email
 
 router = APIRouter()
 
@@ -63,7 +71,8 @@ async def login(
     return {
         "access_token": access_token,
         "refresh_token": refresh_token_str,
-        "token_type": "bearer"
+        "token_type": "bearer",
+        "must_change_password": user.must_change_password,
     }
 
 @router.post("/refresh", response_model=TokenResponse)
@@ -126,3 +135,109 @@ async def logout(
         await db.commit()
         
     return {"status": "success", "message": "Successfully logged out"}
+
+# --- PASSWORD MANAGEMENT ---
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+@router.post("/change-password", status_code=status.HTTP_200_OK)
+async def change_password(
+    payload: ChangePasswordRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session)
+):
+    if not verify_password(payload.old_password, current_user.hashed_password):
+        raise HTTPException(status_code=400, detail="Incorrect current password.")
+        
+    current_user.hashed_password = get_password_hash(payload.new_password)
+    current_user.must_change_password = False # <-- ADD THIS LINE
+    
+    db.add(current_user)
+    
+    cleanup_stmt = delete(RefreshToken).where(RefreshToken.user_id == current_user.id)
+    await db.exec(cleanup_stmt)
+    await db.commit()
+    
+    return {"status": "success", "message": "Password updated successfully."}
+
+# --- OTP RESET SCHEMAS ---
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+class ResetPasswordRequest(BaseModel):
+    email: str
+    otp: str
+    new_password: str
+
+# --- OTP RESET ENDPOINTS ---
+
+@router.post("/forgot-password", status_code=status.HTTP_200_OK)
+async def forgot_password(
+    payload: ForgotPasswordRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_session)
+):
+    # 1. Verify user exists
+    user_stmt = select(User).where(User.email == payload.email)
+    user = (await db.exec(user_stmt)).first()
+    
+    # We return success even if the user doesn't exist to prevent email enumeration attacks
+    if not user or not user.is_active:
+        return {"status": "success", "message": "If that account exists, an OTP has been sent."}
+
+    # 2. Generate 6-digit OTP and set 5-minute expiry
+    otp_code = str(random.randint(100000, 999999))
+    expires_at = datetime.utcnow() + timedelta(minutes=5)
+
+    # 3. Clear any existing OTPs for this email to prevent code overlap
+    await db.exec(delete(PasswordResetOTP).where(PasswordResetOTP.email == payload.email))
+    
+    # 4. Save new OTP
+    db_otp = PasswordResetOTP(email=payload.email, otp_code=otp_code, expires_at=expires_at)
+    db.add(db_otp)
+    await db.commit()
+
+    # 5. Dispatch email in the background to prevent blocking the HTTP response[cite: 5]
+    background_tasks.add_task(send_otp_email, to_email=payload.email, otp=otp_code)
+
+    return {"status": "success", "message": "If that account exists, an OTP has been sent."}
+
+@router.post("/reset-password", status_code=status.HTTP_200_OK)
+async def reset_password(
+    payload: ResetPasswordRequest,
+    db: AsyncSession = Depends(get_session)
+):
+    # 1. Find the OTP record
+    otp_stmt = select(PasswordResetOTP).where(
+        (PasswordResetOTP.email == payload.email) & 
+        (PasswordResetOTP.otp_code == payload.otp)
+    )
+    db_otp = (await db.exec(otp_stmt)).first()
+
+    if not db_otp:
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP.")
+
+    if db_otp.expires_at < datetime.utcnow():
+        await db.exec(delete(PasswordResetOTP).where(PasswordResetOTP.id == db_otp.id))
+        await db.commit()
+        raise HTTPException(status_code=400, detail="OTP has expired. Please request a new one.")
+
+    # 2. Update the User's Password
+    user = (await db.exec(select(User).where(User.email == payload.email))).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    user.hashed_password = get_password_hash(payload.new_password)
+    user.must_change_password = False
+    db.add(user)
+
+    # 3. Wipe OTP and all existing active sessions
+    await db.exec(delete(PasswordResetOTP).where(PasswordResetOTP.id == db_otp.id))
+    await db.exec(delete(RefreshToken).where(RefreshToken.user_id == user.id))
+    
+    await db.commit()
+
+    return {"status": "success", "message": "Password has been successfully reset. Please log in."}

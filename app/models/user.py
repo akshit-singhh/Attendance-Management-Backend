@@ -26,6 +26,7 @@ class User(SQLModel, table=True):
     full_name: str
     
     is_active: bool = Field(default=True)
+    must_change_password: bool = Field(default=True)
     fcm_token: Optional[str] = None 
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -57,3 +58,10 @@ class RefreshToken(SQLModel, table=True):
     expires_at: datetime
     created_at: datetime = Field(default_factory=datetime.utcnow)
     is_revoked: bool = Field(default=False)
+    
+    
+class PasswordResetOTP(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    email: str = Field(index=True)
+    otp_code: str
+    expires_at: datetime
