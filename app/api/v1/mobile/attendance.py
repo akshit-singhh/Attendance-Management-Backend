@@ -4,6 +4,8 @@ from sqlmodel import select
 from typing import List
 from datetime import date, datetime
 from sqlalchemy.exc import IntegrityError
+from app.models.attendance import CorrectionRequest, CorrectionRequestCreate, CorrectionStatus, SessionHistoryResponse
+from app.models.academic import Subject, Section, CourseOffering
 
 from app.core.database import get_session
 from app.api.deps import require_teacher
@@ -197,3 +199,80 @@ async def sync_offline_attendance(
         "message": f"Successfully synchronized {len(db_records)} records.",
         "session_id": new_session.id
     }
+    
+@router.get("/history", response_model=List[SessionHistoryResponse])
+async def get_teacher_history(
+    teacher_id: int = Depends(require_teacher),
+    db: AsyncSession = Depends(get_session)
+):
+    """Fetch a distinct list of past classes this teacher has already submitted."""
+    
+    statement = (
+        select(
+            AttendanceRecord.course_offering_id,
+            AttendanceRecord.date,
+            Subject.name.label("subject_name"),
+            Section.name.label("section_name")
+        )
+        .join(CourseOffering, AttendanceRecord.course_offering_id == CourseOffering.id)
+        .join(Subject, CourseOffering.subject_id == Subject.id)
+        .join(Section, CourseOffering.section_id == Section.id)
+        .where(AttendanceRecord.marked_by_id == teacher_id)
+        .distinct()
+        .order_by(AttendanceRecord.date.desc())
+    )
+    
+    result = await db.exec(statement)
+    
+    history = []
+    for row in result:
+        history.append(SessionHistoryResponse(
+            course_offering_id=row.course_offering_id,
+            date=row.date,
+            subject_name=row.subject_name,
+            section_name=row.section_name
+        ))
+        
+    return history
+
+@router.post("/corrections", status_code=status.HTTP_201_CREATED)
+async def submit_correction(
+    payload: CorrectionRequestCreate,
+    teacher_id: int = Depends(require_teacher),
+    db: AsyncSession = Depends(get_session)
+):
+    """Submit a request to modify an already finalized attendance record."""
+    
+    # 1. Verify the original record exists and belongs to this teacher
+    record = await db.get(AttendanceRecord, payload.attendance_record_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Attendance record not found.")
+        
+    if record.marked_by_id != teacher_id:
+        raise HTTPException(status_code=403, detail="You can only submit corrections for records you marked.")
+        
+    if record.status == payload.suggested_status:
+        raise HTTPException(status_code=400, detail="Suggested status is identical to the current status.")
+
+    # 2. Prevent duplicate pending requests for the same record
+    existing_req = await db.exec(
+        select(CorrectionRequest).where(
+            (CorrectionRequest.attendance_record_id == payload.attendance_record_id) &
+            (CorrectionRequest.status == CorrectionStatus.PENDING)
+        )
+    )
+    if existing_req.first():
+        raise HTTPException(status_code=400, detail="A pending correction request already exists for this record.")
+
+    # 3. Create the request
+    correction = CorrectionRequest(
+        attendance_record_id=payload.attendance_record_id,
+        suggested_status=payload.suggested_status,
+        reason=payload.reason,
+        submitted_by_id=teacher_id
+    )
+    
+    db.add(correction)
+    await db.commit()
+    
+    return {"status": "success", "message": "Correction request submitted for HOD approval."}

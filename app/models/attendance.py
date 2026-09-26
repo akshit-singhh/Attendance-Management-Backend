@@ -57,20 +57,32 @@ class AttendanceRecord(SQLModel, table=True):
     session: AttendanceSession = Relationship(back_populates="records")
     audit_logs: List["AttendanceAuditLog"] = Relationship(back_populates="record")
 
+class CorrectionStatus(str, Enum):
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
 class CorrectionRequest(SQLModel, table=True):
-    """Controlled request to change a locked session's attendance"""
     id: Optional[int] = Field(default=None, primary_key=True)
-    session_id: int = Field(foreign_key="attendancesession.id")
-    record_id: int = Field(foreign_key="attendancerecord.id") # Identifies the specific student's record
-    requested_by_id: int = Field(foreign_key="user.id")
+    attendance_record_id: int = Field(foreign_key="attendancerecord.id")
     
-    proposed_status: AttendanceStatus 
+    suggested_status: AttendanceStatus
     reason: str
+    status: CorrectionStatus = Field(default=CorrectionStatus.PENDING)
     
-    status: str = Field(default="PENDING") # PENDING, APPROVED, REJECTED
-    approved_by_id: Optional[int] = Field(default=None, foreign_key="user.id")
-    rejection_reason: Optional[str] = None # Mandatory on rejection[cite: 1]
-    resolved_at: Optional[datetime] = None
+    submitted_by_id: int = Field(foreign_key="user.id")
+    applied_on: datetime = Field(default_factory=datetime.utcnow)
+
+class CorrectionRequestCreate(BaseModel):
+    attendance_record_id: int
+    suggested_status: AttendanceStatus
+    reason: str
+
+class SessionHistoryResponse(BaseModel):
+    course_offering_id: int
+    subject_name: str
+    section_name: str
+    date: date
 
 class AttendanceAuditLog(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)

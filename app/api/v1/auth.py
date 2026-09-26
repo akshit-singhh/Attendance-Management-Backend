@@ -1,36 +1,37 @@
+import random
 from datetime import datetime, timedelta
-from fastapi import APIRouter, Depends, HTTPException, status
+from typing import List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlmodel import select, delete
 from sqlalchemy.orm import selectinload
-from pydantic import BaseModel
 
 from app.core.database import get_session
 from app.core.config import settings
-from app.core.security import verify_password, create_access_token, create_refresh_token
-from app.models.user import User, RefreshToken
-from app.models.auth import TokenResponse, RefreshTokenRequest
+from app.core.security import verify_password, create_access_token, create_refresh_token, get_password_hash
+from app.models.user import User, RefreshToken, PasswordResetOTP
 from app.api.deps import get_current_user
-from app.core.security import get_password_hash
-
-
-import random
-from fastapi import BackgroundTasks
-from app.models.user import PasswordResetOTP
 from app.services.email_service import send_otp_email
 
-router = APIRouter()
+# Import all schemas from the models file
+from app.models.auth import (
+    LoginRequest,
+    TokenResponse, 
+    RefreshTokenRequest,
+    ChangePasswordRequest,
+    ForgotPasswordRequest,
+    ResetPasswordRequest,
+    SwitchRoleRequest
+)
 
-class LoginRequest(BaseModel):
-    email: str
-    password: str
+router = APIRouter()
 
 @router.post("/login", response_model=TokenResponse)
 async def login(
     payload: LoginRequest,
     db: AsyncSession = Depends(get_session)
 ):
-    # Fetch User and eagerly load role_assignments to prevent async MissingGreenlet errors
     statement = select(User).options(selectinload(User.role_assignments)).where(User.email == payload.email)
     result = await db.exec(statement)
     user = result.first()
@@ -45,17 +46,26 @@ async def login(
     if not user.is_active:
         raise HTTPException(status_code=400, detail="Inactive user")
 
-    # --- GARBAGE COLLECTION ---
-    # Delete all expired or revoked tokens for this specific user to prevent database bloat
     cleanup_stmt = delete(RefreshToken).where(
         (RefreshToken.user_id == user.id) & 
         ((RefreshToken.is_revoked == True) | (RefreshToken.expires_at < datetime.utcnow()))
     )
     await db.exec(cleanup_stmt)
-    # --------------------------
 
-    # Extract the primary role for the JWT payload
-    primary_role = user.role_assignments[0].role.value if user.role_assignments else "USER"
+    # Extract ALL roles to send to the Android app
+    available_roles = [
+        {
+            "role": ra.role.value, 
+            "scope_type": ra.scope_type.value, 
+            "scope_id": ra.scope_id
+        } 
+        for ra in user.role_assignments
+    ]
+
+    # Extract the primary role for the initial JWT payload
+    primary_assignment = user.role_assignments[0] if user.role_assignments else None
+    primary_role = primary_assignment.role.value if primary_assignment else "USER"
+    
     access_token = create_access_token(subject=user.id, role=primary_role)
     refresh_token_str = create_refresh_token(subject=user.id)
 
@@ -73,6 +83,8 @@ async def login(
         "refresh_token": refresh_token_str,
         "token_type": "bearer",
         "must_change_password": user.must_change_password,
+        "available_roles": available_roles,
+        "active_role": primary_role
     }
 
 @router.post("/refresh", response_model=TokenResponse)
@@ -101,7 +113,14 @@ async def refresh_token(
     db_token.is_revoked = True
     db.add(db_token)
 
-    primary_role = user.role_assignments[0].role.value if user.role_assignments else "USER"
+    available_roles = [
+        {"role": ra.role.value, "scope_type": ra.scope_type.value, "scope_id": ra.scope_id} 
+        for ra in user.role_assignments
+    ]
+    
+    primary_assignment = user.role_assignments[0] if user.role_assignments else None
+    primary_role = primary_assignment.role.value if primary_assignment else "USER"
+    
     new_access_token = create_access_token(subject=user.id, role=primary_role)
     new_refresh_token_str = create_refresh_token(subject=user.id)
 
@@ -117,7 +136,10 @@ async def refresh_token(
     return {
         "access_token": new_access_token,
         "refresh_token": new_refresh_token_str,
-        "token_type": "bearer"
+        "token_type": "bearer",
+        "must_change_password": user.must_change_password,
+        "available_roles": available_roles,
+        "active_role": primary_role
     }
 
 @router.post("/logout")
@@ -136,12 +158,6 @@ async def logout(
         
     return {"status": "success", "message": "Successfully logged out"}
 
-# --- PASSWORD MANAGEMENT ---
-
-class ChangePasswordRequest(BaseModel):
-    old_password: str
-    new_password: str
-
 @router.post("/change-password", status_code=status.HTTP_200_OK)
 async def change_password(
     payload: ChangePasswordRequest,
@@ -152,7 +168,7 @@ async def change_password(
         raise HTTPException(status_code=400, detail="Incorrect current password.")
         
     current_user.hashed_password = get_password_hash(payload.new_password)
-    current_user.must_change_password = False # <-- ADD THIS LINE
+    current_user.must_change_password = False 
     
     db.add(current_user)
     
@@ -162,45 +178,27 @@ async def change_password(
     
     return {"status": "success", "message": "Password updated successfully."}
 
-# --- OTP RESET SCHEMAS ---
-
-class ForgotPasswordRequest(BaseModel):
-    email: str
-
-class ResetPasswordRequest(BaseModel):
-    email: str
-    otp: str
-    new_password: str
-
-# --- OTP RESET ENDPOINTS ---
-
 @router.post("/forgot-password", status_code=status.HTTP_200_OK)
 async def forgot_password(
     payload: ForgotPasswordRequest,
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_session)
 ):
-    # 1. Verify user exists
     user_stmt = select(User).where(User.email == payload.email)
     user = (await db.exec(user_stmt)).first()
     
-    # We return success even if the user doesn't exist to prevent email enumeration attacks
     if not user or not user.is_active:
         return {"status": "success", "message": "If that account exists, an OTP has been sent."}
 
-    # 2. Generate 6-digit OTP and set 5-minute expiry
     otp_code = str(random.randint(100000, 999999))
     expires_at = datetime.utcnow() + timedelta(minutes=5)
 
-    # 3. Clear any existing OTPs for this email to prevent code overlap
     await db.exec(delete(PasswordResetOTP).where(PasswordResetOTP.email == payload.email))
     
-    # 4. Save new OTP
     db_otp = PasswordResetOTP(email=payload.email, otp_code=otp_code, expires_at=expires_at)
     db.add(db_otp)
     await db.commit()
 
-    # 5. Dispatch email in the background to prevent blocking the HTTP response[cite: 5]
     background_tasks.add_task(send_otp_email, to_email=payload.email, otp=otp_code)
 
     return {"status": "success", "message": "If that account exists, an OTP has been sent."}
@@ -210,7 +208,6 @@ async def reset_password(
     payload: ResetPasswordRequest,
     db: AsyncSession = Depends(get_session)
 ):
-    # 1. Find the OTP record
     otp_stmt = select(PasswordResetOTP).where(
         (PasswordResetOTP.email == payload.email) & 
         (PasswordResetOTP.otp_code == payload.otp)
@@ -225,7 +222,6 @@ async def reset_password(
         await db.commit()
         raise HTTPException(status_code=400, detail="OTP has expired. Please request a new one.")
 
-    # 2. Update the User's Password
     user = (await db.exec(select(User).where(User.email == payload.email))).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
@@ -234,10 +230,57 @@ async def reset_password(
     user.must_change_password = False
     db.add(user)
 
-    # 3. Wipe OTP and all existing active sessions
     await db.exec(delete(PasswordResetOTP).where(PasswordResetOTP.id == db_otp.id))
     await db.exec(delete(RefreshToken).where(RefreshToken.user_id == user.id))
     
     await db.commit()
 
     return {"status": "success", "message": "Password has been successfully reset. Please log in."}
+
+@router.post("/switch-role", response_model=TokenResponse)
+async def switch_role(
+    payload: SwitchRoleRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session)
+):
+    """Reissue a JWT with a different active role/scope from the user's authorized list."""
+    
+    # Verify the user actually has the requested role/scope combination
+    target_assignment = next(
+        (ra for ra in current_user.role_assignments 
+         if ra.role.value == payload.role and ra.scope_id == payload.scope_id), 
+        None
+    )
+    
+    if not target_assignment:
+        raise HTTPException(
+            status_code=403, 
+            detail="You are not authorized to assume this role or scope."
+        )
+        
+    # Generate new tokens using the selected role
+    new_access_token = create_access_token(
+        subject=current_user.id, 
+        role=target_assignment.role.value
+    )
+    new_refresh_token_str = create_refresh_token(subject=current_user.id)
+    
+    # Rotate refresh tokens
+    await db.exec(delete(RefreshToken).where(RefreshToken.user_id == current_user.id))
+    expires_at = datetime.utcnow() + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
+    db.add(RefreshToken(user_id=current_user.id, token=new_refresh_token_str, expires_at=expires_at))
+    await db.commit()
+    
+    available_roles = [
+        {"role": ra.role.value, "scope_type": ra.scope_type.value, "scope_id": ra.scope_id} 
+        for ra in current_user.role_assignments
+    ]
+
+    return {
+        "access_token": new_access_token,
+        "refresh_token": new_refresh_token_str,
+        "token_type": "bearer",
+        "must_change_password": current_user.must_change_password,
+        "available_roles": available_roles,
+        "active_role": target_assignment.role.value
+    }

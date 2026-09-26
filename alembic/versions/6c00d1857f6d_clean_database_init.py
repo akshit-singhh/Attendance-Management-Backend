@@ -1,8 +1,8 @@
-"""v0.2 SRS Schema
+"""Clean database init
 
-Revision ID: 386efba06a5d
+Revision ID: 6c00d1857f6d
 Revises: 
-Create Date: 2026-09-23 18:22:11.014085
+Create Date: 2026-09-26 16:12:23.653790
 
 """
 from typing import Sequence, Union
@@ -13,7 +13,7 @@ import sqlmodel
 
 
 # revision identifiers, used by Alembic.
-revision: str = '386efba06a5d'
+revision: str = '6c00d1857f6d'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -30,6 +30,14 @@ def upgrade() -> None:
     sa.Column('is_active', sa.Boolean(), nullable=False),
     sa.PrimaryKeyConstraint('id')
     )
+    op.create_table('passwordresetotp',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('email', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+    sa.Column('otp_code', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+    sa.Column('expires_at', sa.DateTime(), nullable=False),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_passwordresetotp_email'), 'passwordresetotp', ['email'], unique=False)
     op.create_table('program',
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('name', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
@@ -51,6 +59,7 @@ def upgrade() -> None:
     sa.Column('hashed_password', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('full_name', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
     sa.Column('is_active', sa.Boolean(), nullable=False),
+    sa.Column('must_change_password', sa.Boolean(), nullable=False),
     sa.Column('fcm_token', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
     sa.Column('created_at', sa.DateTime(), nullable=False),
     sa.PrimaryKeyConstraint('id')
@@ -62,6 +71,20 @@ def upgrade() -> None:
     sa.Column('start_year', sa.Integer(), nullable=False),
     sa.Column('expected_end_year', sa.Integer(), nullable=False),
     sa.ForeignKeyConstraint(['program_id'], ['program.id'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_table('leaverequest',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('student_id', sa.Integer(), nullable=False),
+    sa.Column('start_date', sa.Date(), nullable=False),
+    sa.Column('end_date', sa.Date(), nullable=False),
+    sa.Column('reason', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+    sa.Column('document_url', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+    sa.Column('status', sa.Enum('PENDING', 'APPROVED', 'REJECTED', name='leavestatus'), nullable=False),
+    sa.Column('reviewed_by_id', sa.Integer(), nullable=True),
+    sa.Column('applied_on', sa.DateTime(), nullable=False),
+    sa.ForeignKeyConstraint(['reviewed_by_id'], ['user.id'], ),
+    sa.ForeignKeyConstraint(['student_id'], ['user.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_table('refreshtoken',
@@ -171,19 +194,6 @@ def upgrade() -> None:
     sa.PrimaryKeyConstraint('id')
     )
     op.create_index(op.f('ix_attendancerecord_record_uuid'), 'attendancerecord', ['record_uuid'], unique=True)
-    op.create_table('correctionrequest',
-    sa.Column('id', sa.Integer(), nullable=False),
-    sa.Column('session_id', sa.Integer(), nullable=False),
-    sa.Column('requested_by_id', sa.Integer(), nullable=False),
-    sa.Column('reason', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
-    sa.Column('status', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
-    sa.Column('approved_by_id', sa.Integer(), nullable=True),
-    sa.Column('resolved_at', sa.DateTime(), nullable=True),
-    sa.ForeignKeyConstraint(['approved_by_id'], ['user.id'], ),
-    sa.ForeignKeyConstraint(['requested_by_id'], ['user.id'], ),
-    sa.ForeignKeyConstraint(['session_id'], ['attendancesession.id'], ),
-    sa.PrimaryKeyConstraint('id')
-    )
     op.create_table('attendanceauditlog',
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('attendance_record_id', sa.Integer(), nullable=False),
@@ -196,14 +206,26 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['changed_by_id'], ['user.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
+    op.create_table('correctionrequest',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('attendance_record_id', sa.Integer(), nullable=False),
+    sa.Column('suggested_status', sa.Enum('PRESENT', 'ABSENT', name='attendancestatus'), nullable=False),
+    sa.Column('reason', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+    sa.Column('status', sa.Enum('PENDING', 'APPROVED', 'REJECTED', name='correctionstatus'), nullable=False),
+    sa.Column('submitted_by_id', sa.Integer(), nullable=False),
+    sa.Column('applied_on', sa.DateTime(), nullable=False),
+    sa.ForeignKeyConstraint(['attendance_record_id'], ['attendancerecord.id'], ),
+    sa.ForeignKeyConstraint(['submitted_by_id'], ['user.id'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
     # ### end Alembic commands ###
 
 
 def downgrade() -> None:
     """Downgrade schema."""
     # ### commands auto generated by Alembic - please adjust! ###
-    op.drop_table('attendanceauditlog')
     op.drop_table('correctionrequest')
+    op.drop_table('attendanceauditlog')
     op.drop_index(op.f('ix_attendancerecord_record_uuid'), table_name='attendancerecord')
     op.drop_table('attendancerecord')
     op.drop_table('substitutegrant')
@@ -218,6 +240,7 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_refreshtoken_user_id'), table_name='refreshtoken')
     op.drop_index(op.f('ix_refreshtoken_token'), table_name='refreshtoken')
     op.drop_table('refreshtoken')
+    op.drop_table('leaverequest')
     op.drop_table('batch')
     op.drop_index(op.f('ix_user_email'), table_name='user')
     op.drop_table('user')
@@ -225,5 +248,7 @@ def downgrade() -> None:
     op.drop_table('subject')
     op.drop_index(op.f('ix_program_name'), table_name='program')
     op.drop_table('program')
+    op.drop_index(op.f('ix_passwordresetotp_email'), table_name='passwordresetotp')
+    op.drop_table('passwordresetotp')
     op.drop_table('academicterm')
     # ### end Alembic commands ###
