@@ -1,5 +1,5 @@
 import random
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
@@ -25,9 +25,7 @@ from app.models.auth import (
     SwitchRoleRequest
 )
 
-
 router = APIRouter()
-
 
 @router.post("/login", response_model=TokenResponse)
 async def login(
@@ -52,12 +50,11 @@ async def login(
         (RefreshToken.user_id == user.id) &
         (
             (RefreshToken.is_revoked == True) |
-            (RefreshToken.expires_at < datetime.now(timezone.utc))
+            (RefreshToken.expires_at < datetime.utcnow())
         )
     )
     await db.exec(cleanup_stmt)
 
-    # Extract ALL roles to send to the Android app
     available_roles = [
         {
             "role": ra.role.value,
@@ -67,14 +64,13 @@ async def login(
         for ra in user.role_assignments
     ]
 
-    # Extract the primary role for the initial JWT payload
     primary_assignment = user.role_assignments[0] if user.role_assignments else None
     primary_role = primary_assignment.role.value if primary_assignment else "USER"
 
     access_token = create_access_token(subject=user.id, role=primary_role)
     refresh_token_str = create_refresh_token(subject=user.id)
 
-    expires_at = datetime.now(timezone.utc) + timedelta(
+    expires_at = datetime.utcnow() + timedelta(
         days=settings.REFRESH_TOKEN_EXPIRE_DAYS
     )
 
@@ -96,7 +92,6 @@ async def login(
         "active_role": primary_role
     }
 
-
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh_token(
     request: RefreshTokenRequest,
@@ -112,7 +107,7 @@ async def refresh_token(
     if db_token.is_revoked:
         raise HTTPException(status_code=401, detail="Refresh token has been revoked")
 
-    if db_token.expires_at < datetime.now(timezone.utc):
+    if db_token.expires_at < datetime.utcnow():
         raise HTTPException(status_code=401, detail="Refresh token expired")
 
     statement_user = select(User).options(
@@ -149,7 +144,7 @@ async def refresh_token(
         subject=user.id
     )
 
-    expires_at = datetime.now(timezone.utc) + timedelta(
+    expires_at = datetime.utcnow() + timedelta(
         days=settings.REFRESH_TOKEN_EXPIRE_DAYS
     )
 
@@ -170,7 +165,6 @@ async def refresh_token(
         "available_roles": available_roles,
         "active_role": primary_role
     }
-
 
 @router.post("/logout")
 async def logout(
@@ -193,7 +187,6 @@ async def logout(
         "status": "success",
         "message": "Successfully logged out"
     }
-
 
 @router.post("/change-password", status_code=status.HTTP_200_OK)
 async def change_password(
@@ -230,7 +223,6 @@ async def change_password(
         "message": "Password updated successfully."
     }
 
-
 @router.post("/forgot-password", status_code=status.HTTP_200_OK)
 async def forgot_password(
     payload: ForgotPasswordRequest,
@@ -248,7 +240,7 @@ async def forgot_password(
 
     otp_code = str(random.randint(100000, 999999))
 
-    expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+    expires_at = datetime.utcnow() + timedelta(minutes=5)
 
     await db.exec(
         delete(PasswordResetOTP).where(
@@ -276,7 +268,6 @@ async def forgot_password(
         "message": "If that account exists, an OTP has been sent."
     }
 
-
 @router.post("/reset-password", status_code=status.HTTP_200_OK)
 async def reset_password(
     payload: ResetPasswordRequest,
@@ -295,7 +286,7 @@ async def reset_password(
             detail="Invalid or expired OTP."
         )
 
-    if db_otp.expires_at < datetime.now(timezone.utc):
+    if db_otp.expires_at < datetime.utcnow():
         await db.exec(
             delete(PasswordResetOTP).where(
                 PasswordResetOTP.id == db_otp.id
@@ -348,16 +339,12 @@ async def reset_password(
         "message": "Password has been successfully reset. Please log in."
     }
 
-
 @router.post("/switch-role", response_model=TokenResponse)
 async def switch_role(
     payload: SwitchRoleRequest,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session)
 ):
-    """Reissue a JWT with a different active role/scope from the user's authorized list."""
-
-    # Verify the user actually has the requested role/scope combination
     target_assignment = next(
         (
             ra
@@ -374,7 +361,6 @@ async def switch_role(
             detail="You are not authorized to assume this role or scope."
         )
 
-    # Generate new tokens using the selected role
     new_access_token = create_access_token(
         subject=current_user.id,
         role=target_assignment.role.value
@@ -384,14 +370,13 @@ async def switch_role(
         subject=current_user.id
     )
 
-    # Rotate refresh tokens
     await db.exec(
         delete(RefreshToken).where(
             RefreshToken.user_id == current_user.id
         )
     )
 
-    expires_at = datetime.now(timezone.utc) + timedelta(
+    expires_at = datetime.utcnow() + timedelta(
         days=settings.REFRESH_TOKEN_EXPIRE_DAYS
     )
 
