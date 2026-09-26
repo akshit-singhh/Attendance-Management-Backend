@@ -70,9 +70,7 @@ async def login(
     access_token = create_access_token(subject=user.id, role=primary_role)
     refresh_token_str = create_refresh_token(subject=user.id)
 
-    expires_at = datetime.utcnow() + timedelta(
-        days=settings.REFRESH_TOKEN_EXPIRE_DAYS
-    )
+    expires_at = datetime.utcnow() + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
 
     db_refresh_token = RefreshToken(
         user_id=user.id,
@@ -135,18 +133,10 @@ async def refresh_token(
     primary_assignment = user.role_assignments[0] if user.role_assignments else None
     primary_role = primary_assignment.role.value if primary_assignment else "USER"
 
-    new_access_token = create_access_token(
-        subject=user.id,
-        role=primary_role
-    )
+    new_access_token = create_access_token(subject=user.id, role=primary_role)
+    new_refresh_token_str = create_refresh_token(subject=user.id)
 
-    new_refresh_token_str = create_refresh_token(
-        subject=user.id
-    )
-
-    expires_at = datetime.utcnow() + timedelta(
-        days=settings.REFRESH_TOKEN_EXPIRE_DAYS
-    )
+    expires_at = datetime.utcnow() + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
 
     new_db_token = RefreshToken(
         user_id=user.id,
@@ -171,10 +161,7 @@ async def logout(
     request: RefreshTokenRequest,
     db: AsyncSession = Depends(get_session)
 ):
-    statement = select(RefreshToken).where(
-        RefreshToken.token == request.refresh_token
-    )
-
+    statement = select(RefreshToken).where(RefreshToken.token == request.refresh_token)
     result = await db.exec(statement)
     db_token = result.first()
 
@@ -183,10 +170,7 @@ async def logout(
         db.add(db_token)
         await db.commit()
 
-    return {
-        "status": "success",
-        "message": "Successfully logged out"
-    }
+    return {"status": "success", "message": "Successfully logged out"}
 
 @router.post("/change-password", status_code=status.HTTP_200_OK)
 async def change_password(
@@ -194,34 +178,18 @@ async def change_password(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_session)
 ):
-    if not verify_password(
-        payload.old_password,
-        current_user.hashed_password
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail="Incorrect current password."
-        )
+    if not verify_password(payload.old_password, current_user.hashed_password):
+        raise HTTPException(status_code=400, detail="Incorrect current password.")
 
-    current_user.hashed_password = get_password_hash(
-        payload.new_password
-    )
-
+    current_user.hashed_password = get_password_hash(payload.new_password)
     current_user.must_change_password = False
-
     db.add(current_user)
 
-    cleanup_stmt = delete(RefreshToken).where(
-        RefreshToken.user_id == current_user.id
-    )
-
+    cleanup_stmt = delete(RefreshToken).where(RefreshToken.user_id == current_user.id)
     await db.exec(cleanup_stmt)
     await db.commit()
 
-    return {
-        "status": "success",
-        "message": "Password updated successfully."
-    }
+    return {"status": "success", "message": "Password updated successfully."}
 
 @router.post("/forgot-password", status_code=status.HTTP_200_OK)
 async def forgot_password(
@@ -233,40 +201,20 @@ async def forgot_password(
     user = (await db.exec(user_stmt)).first()
 
     if not user or not user.is_active:
-        return {
-            "status": "success",
-            "message": "If that account exists, an OTP has been sent."
-        }
+        return {"status": "success", "message": "If that account exists, an OTP has been sent."}
 
     otp_code = str(random.randint(100000, 999999))
-
     expires_at = datetime.utcnow() + timedelta(minutes=5)
 
-    await db.exec(
-        delete(PasswordResetOTP).where(
-            PasswordResetOTP.email == payload.email
-        )
-    )
+    await db.exec(delete(PasswordResetOTP).where(PasswordResetOTP.email == payload.email))
 
-    db_otp = PasswordResetOTP(
-        email=payload.email,
-        otp_code=otp_code,
-        expires_at=expires_at
-    )
-
+    db_otp = PasswordResetOTP(email=payload.email, otp_code=otp_code, expires_at=expires_at)
     db.add(db_otp)
     await db.commit()
 
-    background_tasks.add_task(
-        send_otp_email,
-        to_email=payload.email,
-        otp=otp_code
-    )
+    background_tasks.add_task(send_otp_email, to_email=payload.email, otp=otp_code)
 
-    return {
-        "status": "success",
-        "message": "If that account exists, an OTP has been sent."
-    }
+    return {"status": "success", "message": "If that account exists, an OTP has been sent."}
 
 @router.post("/reset-password", status_code=status.HTTP_200_OK)
 async def reset_password(
@@ -281,63 +229,27 @@ async def reset_password(
     db_otp = (await db.exec(otp_stmt)).first()
 
     if not db_otp:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid or expired OTP."
-        )
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP.")
 
     if db_otp.expires_at < datetime.utcnow():
-        await db.exec(
-            delete(PasswordResetOTP).where(
-                PasswordResetOTP.id == db_otp.id
-            )
-        )
-
+        await db.exec(delete(PasswordResetOTP).where(PasswordResetOTP.id == db_otp.id))
         await db.commit()
+        raise HTTPException(status_code=400, detail="OTP has expired. Please request a new one.")
 
-        raise HTTPException(
-            status_code=400,
-            detail="OTP has expired. Please request a new one."
-        )
-
-    user = (
-        await db.exec(
-            select(User).where(User.email == payload.email)
-        )
-    ).first()
+    user = (await db.exec(select(User).where(User.email == payload.email))).first()
 
     if not user:
-        raise HTTPException(
-            status_code=404,
-            detail="User not found."
-        )
+        raise HTTPException(status_code=404, detail="User not found.")
 
-    user.hashed_password = get_password_hash(
-        payload.new_password
-    )
-
+    user.hashed_password = get_password_hash(payload.new_password)
     user.must_change_password = False
-
     db.add(user)
 
-    await db.exec(
-        delete(PasswordResetOTP).where(
-            PasswordResetOTP.id == db_otp.id
-        )
-    )
-
-    await db.exec(
-        delete(RefreshToken).where(
-            RefreshToken.user_id == user.id
-        )
-    )
-
+    await db.exec(delete(PasswordResetOTP).where(PasswordResetOTP.id == db_otp.id))
+    await db.exec(delete(RefreshToken).where(RefreshToken.user_id == user.id))
     await db.commit()
 
-    return {
-        "status": "success",
-        "message": "Password has been successfully reset. Please log in."
-    }
+    return {"status": "success", "message": "Password has been successfully reset. Please log in."}
 
 @router.post("/switch-role", response_model=TokenResponse)
 async def switch_role(
@@ -347,55 +259,27 @@ async def switch_role(
 ):
     target_assignment = next(
         (
-            ra
-            for ra in current_user.role_assignments
-            if ra.role.value == payload.role
-            and ra.scope_id == payload.scope_id
+            ra for ra in current_user.role_assignments
+            if ra.role.value == payload.role and ra.scope_id == payload.scope_id
         ),
         None
     )
 
     if not target_assignment:
-        raise HTTPException(
-            status_code=403,
-            detail="You are not authorized to assume this role or scope."
-        )
+        raise HTTPException(status_code=403, detail="You are not authorized to assume this role or scope.")
 
-    new_access_token = create_access_token(
-        subject=current_user.id,
-        role=target_assignment.role.value
-    )
+    new_access_token = create_access_token(subject=current_user.id, role=target_assignment.role.value)
+    new_refresh_token_str = create_refresh_token(subject=current_user.id)
 
-    new_refresh_token_str = create_refresh_token(
-        subject=current_user.id
-    )
+    await db.exec(delete(RefreshToken).where(RefreshToken.user_id == current_user.id))
 
-    await db.exec(
-        delete(RefreshToken).where(
-            RefreshToken.user_id == current_user.id
-        )
-    )
+    expires_at = datetime.utcnow() + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
 
-    expires_at = datetime.utcnow() + timedelta(
-        days=settings.REFRESH_TOKEN_EXPIRE_DAYS
-    )
-
-    db.add(
-        RefreshToken(
-            user_id=current_user.id,
-            token=new_refresh_token_str,
-            expires_at=expires_at
-        )
-    )
-
+    db.add(RefreshToken(user_id=current_user.id, token=new_refresh_token_str, expires_at=expires_at))
     await db.commit()
 
     available_roles = [
-        {
-            "role": ra.role.value,
-            "scope_type": ra.scope_type.value,
-            "scope_id": ra.scope_id
-        }
+        {"role": ra.role.value, "scope_type": ra.scope_type.value, "scope_id": ra.scope_id}
         for ra in current_user.role_assignments
     ]
 
