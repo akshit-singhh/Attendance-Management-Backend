@@ -1,4 +1,6 @@
 .env
+.env.*
+!.env.example
 .venv/
 __pycache__/
 *.py[cod]
@@ -10,4 +12,7 @@ htmlcov/
 .idea/
 *.sqlite3
 *.db
+*.log
+uploads/*
+!uploads/medical_certificates/
 run_mailpit.py

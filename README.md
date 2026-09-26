@@ -40,6 +40,7 @@ In practical terms, the system is built to support a campus attendance workflow 
 - Passlib + bcrypt for password hashing
 - Uvicorn for running the app
 - Pydantic Settings for environment config
+- Docker for repeatable deployment
 
 Dependencies are listed in requirements.txt.
 
@@ -81,6 +82,12 @@ The application follows a typical FastAPI layered structure:
 
 - /api/v1/web/corrections
   - Correction management flows
+
+- /api/v1/web/leaves
+  - Leave management endpoints
+
+- /api/v1/mobile/leaves
+  - Student leave endpoints
 
 ---
 
@@ -250,16 +257,16 @@ These endpoints are beyond the immediate startup/auth flow, but they are part of
 
 The application expects environment settings in a .env file.
 
-Example:
+No credentials or secret values are stored in this README. Configure these variables in a local `.env` file or in the deployment platform's secret/environment settings:
 
-```env
-SECRET_KEY=your-super-secret-key
-ALGORITHM=HS256
-DATABASE_URL=postgresql+asyncpg://username:password@localhost:5432/attendance_db
-ADMIN_EMAIL=...
-ADMIN_PASSWORD=...
-ADMIN_NAME=System Administrator
-```
+- `SECRET_KEY`
+- `ALGORITHM`
+- `DATABASE_URL`
+- `ADMIN_EMAIL`
+- `ADMIN_PASSWORD`
+- `ADMIN_NAME`
+
+`DATABASE_URL` must use the async PostgreSQL driver format beginning with `postgresql+asyncpg://`.
 
 Important note:
 
@@ -298,7 +305,50 @@ Once running, FastAPI provides Swagger UI and OpenAPI docs:
 
 ---
 
-## 10. Database migrations
+## 10. Deploying with Docker
+
+The repository includes a production Dockerfile. The container performs these steps when it starts:
+
+1. Runs `alembic upgrade head` against the configured database
+2. Starts Uvicorn on `0.0.0.0`
+3. Uses the platform-provided `PORT` value, or port `8000` locally
+
+Build and run it locally:
+
+```bash
+docker build -t attendance-backend .
+docker run --env-file .env -p 8000:8000 attendance-backend
+```
+
+The container requires `DATABASE_URL` to point to PostgreSQL using the async driver format beginning with `postgresql+asyncpg://`.
+
+Do not bake `.env` into the image. It is excluded by `.dockerignore`; configure secrets in the hosting platform instead.
+
+### Render
+
+The included `render.yaml` can be used as a Blueprint. Create or connect a PostgreSQL database, then configure these environment variable names on the web service:
+
+- `DATABASE_URL`
+- `SECRET_KEY`
+- `ADMIN_EMAIL`
+- `ADMIN_PASSWORD`
+- `ADMIN_NAME`
+
+Render supplies `PORT` automatically. The Docker command uses it, so no hard-coded production port is required.
+
+### Coolify and similar platforms
+
+Create a service from this Git repository and choose Dockerfile deployment. Configure the same environment variables listed above. Set the health check path to `/` if the platform asks for one.
+
+If the platform provides a PostgreSQL service, use its internal hostname and credentials in `DATABASE_URL`. The application runs migrations automatically before starting the API.
+
+### Uploaded files in production
+
+The `uploads/` directory is local container storage. Container filesystems may be replaced during redeploys or restarts. Configure a persistent volume or object storage before relying on uploaded medical certificates in production.
+
+---
+
+## 11. Database migrations
 
 The repository includes Alembic migration support.
 
@@ -313,7 +363,7 @@ If database schema changes are required, the migration files under alembic/versi
 
 ---
 
-## 11. Admin bootstrap
+## 12. Admin bootstrap
 
 At app startup, init_admin() is called. That function is likely responsible for ensuring an initial admin account exists.
 
@@ -326,7 +376,7 @@ See:
 
 ---
 
-## 12. Uploads and static files
+## 13. Uploads and static files
 
 The app mounts static uploads using:
 
@@ -340,7 +390,7 @@ The uploads directory is created automatically if it does not exist.
 
 ---
 
-## 13. Security and production considerations
+## 14. Security and production considerations
 
 This project is useful as a backend foundation, but a few things should be checked before production deployment:
 
@@ -355,7 +405,7 @@ The current code intentionally sets CORS to allow all origins for development, w
 
 ---
 
-## 14. How to navigate this repository
+## 15. How to navigate this repository
 
 If you are a new developer or AI tool trying to understand the code quickly, start in this order:
 
@@ -382,7 +432,7 @@ This order gives the best high-level understanding before diving into lower-leve
 
 ---
 
-## 15. Summary
+## 16. Summary
 
 This repo is a role-based university attendance backend built around FastAPI and async SQLModel. It supports:
 
@@ -397,7 +447,7 @@ It is a complete starting point for a campus attendance system and is organized 
 
 ---
 
-## 16. Quick start checklist
+## 17. Quick start checklist
 
 - Install requirements
 - Create .env file
