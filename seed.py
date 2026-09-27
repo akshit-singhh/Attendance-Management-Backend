@@ -9,23 +9,21 @@ from app.models.academic import Program, Batch, AcademicTerm, Section, Subject, 
 
 async def seed_data():
     async with AsyncSession(engine, expire_on_commit=False) as db:
-        print("Seeding database for v0.2...")
+        print("Seeding database with scraper-aligned data...")
 
         password_hash = get_password_hash("password123")
 
-        # 1. Create Users
-        teacher = User(email="teacher@college.edu", hashed_password=password_hash, full_name="Prof. Alan Turing")
+        # 1. Create Base Admin/Student Users
         student_user = User(email="student@college.edu", hashed_password=password_hash, full_name="Alice Smith")
         admin_user = User(email="admin@college.edu", hashed_password=password_hash, full_name="System Admin")
         coord_user = User(email="coordinator@college.edu", hashed_password=password_hash, full_name="Program Coordinator")
 
-        db.add_all([teacher, student_user, admin_user, coord_user])
-        await db.commit() # Commit to generate IDs
+        db.add_all([student_user, admin_user, coord_user])
+        await db.commit() 
 
-        # 2. Assign Roles (The v0.2 Way)
+        # 2. Assign Base Roles
         roles = [
             RoleAssignment(user_id=admin_user.id, role=RoleEnum.ADMIN, scope_type=ScopeTypeEnum.UNIVERSITY),
-            RoleAssignment(user_id=teacher.id, role=RoleEnum.TEACHER, scope_type=ScopeTypeEnum.ASSIGNMENT),
             RoleAssignment(user_id=student_user.id, role=RoleEnum.STUDENT, scope_type=ScopeTypeEnum.PROGRAM),
             RoleAssignment(user_id=coord_user.id, role=RoleEnum.COORDINATOR, scope_type=ScopeTypeEnum.PROGRAM)
         ]
@@ -33,7 +31,7 @@ async def seed_data():
         await db.commit()
 
         # 3. Create the Academic Structure
-        program = Program(name="B.Tech Computer Science", total_semesters=8)
+        program = Program(name="B.Tech Information Technology", total_semesters=8)
         db.add(program)
         await db.commit()
 
@@ -49,40 +47,55 @@ async def seed_data():
         )
         db.add(student_profile)
 
-        # 4. Create the Active Term and Subject
-        term = AcademicTerm(name="Fall 2026", start_date=date(2026, 8, 1), end_date=date(2026, 12, 15), is_active=True)
+        # 4. Create the Exact Term and Section the Scraper is looking for
+        term = AcademicTerm(name="2026-27 Odd", start_date=date(2026, 8, 1), end_date=date(2026, 12, 15), is_active=True)
         db.add(term)
         await db.commit()
 
-        section = Section(name="CSE-A", batch_id=batch.id, term_id=term.id)
-        subject = Subject(course_code="CS401", name="Artificial Intelligence")
+        section = Section(name="CS-IV-A", batch_id=batch.id, term_id=term.id)
         db.add(section)
-        db.add(subject)
         await db.commit()
 
-        # 5. Map the Teacher to the Class (CourseOffering)
-        offering = CourseOffering(
-            term_id=term.id,
-            section_id=section.id,
-            subject_id=subject.id,
-            teacher_id=teacher.id
-        )
-        db.add(offering)
+        # 5. Create the Exact Subjects found by the Scraper
+        subjects = [
+            Subject(course_code="CS401", name="Internet of Things"),
+            Subject(course_code="CS403", name="Soft Computing Techniques"),
+            Subject(course_code="CS405", name="Machine Learning"),
+            Subject(course_code="CS407", name="Pattern Recognition"),
+            Subject(course_code="CS481", name="Internet of Things Lab"),
+            Subject(course_code="MA402", name="Simulation & modelling"),
+        ]
+        db.add_all(subjects)
         await db.commit()
 
-        # 6. Enroll the Student in the Class
-        enrollment = StudentSubjectMap(
-            student_id=student_user.id,
-            course_offering_id=offering.id
-        )
-        db.add(enrollment)
+        # 6. Create the Teachers 
+        # WARNING: The full_name MUST EXACTLY match the name in the Remarks table
+        teachers_data = [
+            ("teacher_vs@college.edu", "Vidushi Sharma"),
+            ("teacher_asb@college.edu", "Anurag Singh Baghel"),
+            ("teacher_sg@college.edu", "Shipra Gupta"),
+            ("teacher_vg@college.edu", "Varshika Gautam"),
+            ("teacher_hb@college.edu", "Harsh Baliyan")
+        ]
+        
+        teacher_users = []
+        for email, name in teachers_data:
+            user = User(email=email, hashed_password=password_hash, full_name=name)
+            db.add(user)
+            teacher_users.append(user)
+        
+        await db.commit()
+
+        # Assign TEACHER roles to all of them
+        teacher_roles = [
+            RoleAssignment(user_id=u.id, role=RoleEnum.TEACHER, scope_type=ScopeTypeEnum.ASSIGNMENT) 
+            for u in teacher_users
+        ]
+        db.add_all(teacher_roles)
         await db.commit()
 
         print("✅ Seeding complete!")
-        print(f"Admin Login: admin@college.edu / password123")
-        print(f"Coordinator Login: coordinator@college.edu / password123")
-        print(f"Teacher Login: teacher@college.edu / password123")
-        print(f"Student Login: student@college.edu / password123")
+        print("Database is now prepared for scrape_and_seed.py")
 
 if __name__ == "__main__":
     asyncio.run(seed_data())

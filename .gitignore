@@ -16,3 +16,4 @@ htmlcov/
 uploads/*
 !uploads/medical_certificates/
 run_mailpit.py
+timetable_snapshots

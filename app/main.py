@@ -12,6 +12,10 @@ from app.api.v1.web import management as web_management
 from app.api.v1.web import corrections as web_corrections
 from app.api.v1.web import leaves as web_leaves
 from app.api.v1.mobile import leaves as mobile_leaves
+from app.api.v1.mobile import timetable as mobile_timetable
+from app.api.v1.web import timetable as web_timetable
+
+
 
 from app.create_admin import init_admin
 

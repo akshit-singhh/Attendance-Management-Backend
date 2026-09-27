@@ -1,8 +1,10 @@
 # app/models/academic.py
 from sqlmodel import SQLModel, Field, Relationship
 from typing import Optional, List
-from datetime import date
+from datetime import date, time
 from pydantic import BaseModel
+from enum import Enum
+from datetime import date, datetime, time
 
 class Program(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -75,3 +77,44 @@ class CourseOfferingCreate(BaseModel):
     section_id: int
     subject_id: int
     teacher_id: int
+    
+class DayOfWeek(str, Enum):
+    MON = "MON"
+    TUE = "TUE"
+    WED = "WED"
+    THU = "THU"
+    FRI = "FRI"
+    SAT = "SAT"
+    SUN = "SUN"
+
+class TimetableEntry(SQLModel, table=True):
+    """One row per (course_offering, day, start_time). Deliberately thin — this
+    is planning/reference data (SRS Section 9: a timetable entry is never an
+    attendance gate), so it carries no status/lock fields."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    course_offering_id: int = Field(foreign_key="courseoffering.id", index=True)
+    day_of_week: DayOfWeek
+    start_time: time
+    end_time: time
+    room: Optional[str] = None
+    batch_label: Optional[str] = None  # e.g. "G-1" / "G-2" for split lab groups
+
+    # Which scrape run produced this row — lets a re-scrape replace exactly its
+    # own prior output without touching rows a different source (manual edit,
+    # a different scraper run) created. See scrape_and_seed_timetable.py.
+    source: str = Field(default="scrape")
+    scraped_at: Optional[datetime] = None
+
+
+# --- Add to the "API SCHEMAS" section at the bottom of the same file ---
+
+class TimetableSlotResponse(BaseModel):
+    course_offering_id: int
+    subject_code: str
+    subject_name: str
+    section_name: str
+    day_of_week: DayOfWeek
+    start_time: time
+    end_time: time
+    room: Optional[str] = None
+    batch_label: Optional[str] = None

@@ -125,6 +125,9 @@ class CourseScheduleResponse(BaseModel):
     subject_name: str
     subject_code: str
     section_name: str
+    start_time: str    # Added
+    end_time: str      # Added
+    room: Optional[str] = None  # Added
     
 class LeaveStatus(str, Enum):
     PENDING = "PENDING"

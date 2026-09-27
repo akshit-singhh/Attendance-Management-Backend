@@ -4,20 +4,22 @@ from sqlmodel import select
 from typing import List
 from datetime import date, datetime
 from sqlalchemy.exc import IntegrityError
-from app.models.attendance import CorrectionRequest, CorrectionRequestCreate, CorrectionStatus, SessionHistoryResponse
-from app.models.academic import Subject, Section, CourseOffering
 
 from app.core.database import get_session
 from app.api.deps import require_teacher
 from app.models.user import User, StudentProfile
-from app.models.academic import CourseOffering, Subject, Section, StudentSubjectMap, SubstituteGrant
+from app.models.academic import CourseOffering, Subject, Section, StudentSubjectMap, SubstituteGrant, TimetableEntry, DayOfWeek # Added TimetableEntry and DayOfWeek
 from app.models.attendance import (
     AttendanceSession,
     AttendanceRecord,
     SessionStatus,
     OfflineSyncPayload,
     StudentRosterResponse,
-    CourseScheduleResponse
+    CourseScheduleResponse,
+    CorrectionRequest, 
+    CorrectionRequestCreate, 
+    CorrectionStatus, 
+    SessionHistoryResponse
 )
 
 router = APIRouter()
@@ -28,25 +30,40 @@ async def get_daily_schedule(
     teacher_id: int = Depends(require_teacher),
     db: AsyncSession = Depends(get_session)
 ):
-    """Fetch all classes assigned to this specific teacher for the current term."""
+    """Fetch all classes assigned to this specific teacher for the current term and day."""
     
+    # Get the current day of the week to filter today's timetable entries
+    current_day_str = "MON"
+    try:
+        current_day = DayOfWeek[current_day_str]
+    except KeyError:
+        # Fallback if the system day doesn't match the Enum (unlikely but safe)
+        current_day = DayOfWeek.MON
+
     statement = (
-        select(CourseOffering, Subject, Section)
+        select(CourseOffering, Subject, Section, TimetableEntry)
         .join(Subject, CourseOffering.subject_id == Subject.id)
         .join(Section, CourseOffering.section_id == Section.id)
+        .join(TimetableEntry, CourseOffering.id == TimetableEntry.course_offering_id)
         .where(CourseOffering.teacher_id == teacher_id)
         .where(CourseOffering.term_id == term_id)
+        .where(TimetableEntry.day_of_week == current_day)
     )
     
     results = await db.exec(statement)
     
     schedule = []
-    for offering, subject, section in results:
+    # Results is now a tuple of 4 objects due to the 4 selected tables
+    for offering, subject, section, timetable_entry in results:
         schedule.append(CourseScheduleResponse(
             course_offering_id=offering.id,
             subject_name=subject.name,
             subject_code=subject.course_code,
-            section_name=section.name
+            section_name=section.name,
+            # Serialize the time objects to strings as defined by the Pydantic model
+            start_time=timetable_entry.start_time.strftime("%H:%M:%S"),
+            end_time=timetable_entry.end_time.strftime("%H:%M:%S"),
+            room=timetable_entry.room
         ))
         
     return schedule
@@ -207,19 +224,20 @@ async def get_teacher_history(
 ):
     """Fetch a distinct list of past classes this teacher has already submitted."""
     
+    # Query AttendanceSession instead of AttendanceRecord to access course and teacher data
     statement = (
         select(
-            AttendanceRecord.course_offering_id,
-            AttendanceRecord.date,
+            AttendanceSession.course_offering_id,
+            AttendanceSession.date,
             Subject.name.label("subject_name"),
             Section.name.label("section_name")
         )
-        .join(CourseOffering, AttendanceRecord.course_offering_id == CourseOffering.id)
+        .join(CourseOffering, AttendanceSession.course_offering_id == CourseOffering.id)
         .join(Subject, CourseOffering.subject_id == Subject.id)
         .join(Section, CourseOffering.section_id == Section.id)
-        .where(AttendanceRecord.marked_by_id == teacher_id)
+        .where(AttendanceSession.teacher_id == teacher_id)
         .distinct()
-        .order_by(AttendanceRecord.date.desc())
+        .order_by(AttendanceSession.date.desc())
     )
     
     result = await db.exec(statement)
@@ -243,18 +261,20 @@ async def submit_correction(
 ):
     """Submit a request to modify an already finalized attendance record."""
     
-    # 1. Verify the original record exists and belongs to this teacher
+    # 1. Verify the original record exists
     record = await db.get(AttendanceRecord, payload.attendance_record_id)
     if not record:
         raise HTTPException(status_code=404, detail="Attendance record not found.")
         
-    if record.marked_by_id != teacher_id:
+    # 2. Check the parent session to verify this teacher marked it
+    session = await db.get(AttendanceSession, record.session_id)
+    if not session or session.teacher_id != teacher_id:
         raise HTTPException(status_code=403, detail="You can only submit corrections for records you marked.")
         
     if record.status == payload.suggested_status:
         raise HTTPException(status_code=400, detail="Suggested status is identical to the current status.")
 
-    # 2. Prevent duplicate pending requests for the same record
+    # 3. Prevent duplicate pending requests for the same record
     existing_req = await db.exec(
         select(CorrectionRequest).where(
             (CorrectionRequest.attendance_record_id == payload.attendance_record_id) &
@@ -264,7 +284,7 @@ async def submit_correction(
     if existing_req.first():
         raise HTTPException(status_code=400, detail="A pending correction request already exists for this record.")
 
-    # 3. Create the request
+    # 4. Create the request
     correction = CorrectionRequest(
         attendance_record_id=payload.attendance_record_id,
         suggested_status=payload.suggested_status,

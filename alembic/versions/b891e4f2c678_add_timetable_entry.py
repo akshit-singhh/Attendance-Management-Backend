@@ -1,8 +1,8 @@
-"""Clean database init
+"""add timetable entry
 
-Revision ID: 6c00d1857f6d
+Revision ID: b891e4f2c678
 Revises: 
-Create Date: 2026-09-26 16:12:23.653790
+Create Date: 2026-09-27 21:43:59.933268
 
 """
 from typing import Sequence, Union
@@ -13,7 +13,7 @@ import sqlmodel
 
 
 # revision identifiers, used by Alembic.
-revision: str = '6c00d1857f6d'
+revision: str = 'b891e4f2c678'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -178,6 +178,20 @@ def upgrade() -> None:
     sa.ForeignKeyConstraint(['substitute_teacher_id'], ['user.id'], ),
     sa.PrimaryKeyConstraint('id')
     )
+    op.create_table('timetableentry',
+    sa.Column('id', sa.Integer(), nullable=False),
+    sa.Column('course_offering_id', sa.Integer(), nullable=False),
+    sa.Column('day_of_week', sa.Enum('MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN', name='dayofweek'), nullable=False),
+    sa.Column('start_time', sa.Time(), nullable=False),
+    sa.Column('end_time', sa.Time(), nullable=False),
+    sa.Column('room', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+    sa.Column('batch_label', sqlmodel.sql.sqltypes.AutoString(), nullable=True),
+    sa.Column('source', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
+    sa.Column('scraped_at', sa.DateTime(), nullable=True),
+    sa.ForeignKeyConstraint(['course_offering_id'], ['courseoffering.id'], ),
+    sa.PrimaryKeyConstraint('id')
+    )
+    op.create_index(op.f('ix_timetableentry_course_offering_id'), 'timetableentry', ['course_offering_id'], unique=False)
     op.create_table('attendancerecord',
     sa.Column('id', sa.Integer(), nullable=False),
     sa.Column('record_uuid', sqlmodel.sql.sqltypes.AutoString(), nullable=False),
@@ -228,6 +242,8 @@ def downgrade() -> None:
     op.drop_table('attendanceauditlog')
     op.drop_index(op.f('ix_attendancerecord_record_uuid'), table_name='attendancerecord')
     op.drop_table('attendancerecord')
+    op.drop_index(op.f('ix_timetableentry_course_offering_id'), table_name='timetableentry')
+    op.drop_table('timetableentry')
     op.drop_table('substitutegrant')
     op.drop_table('studentsubjectmap')
     op.drop_index(op.f('ix_attendancesession_session_uuid'), table_name='attendancesession')
