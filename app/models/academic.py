@@ -1,10 +1,8 @@
-# app/models/academic.py
 from sqlmodel import SQLModel, Field, Relationship
 from typing import Optional, List
-from datetime import date, time
+from datetime import date, time, datetime
 from pydantic import BaseModel
 from enum import Enum
-from datetime import date, datetime, time
 
 class Program(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -105,8 +103,6 @@ class TimetableEntry(SQLModel, table=True):
     source: str = Field(default="scrape")
     scraped_at: Optional[datetime] = None
 
-
-# --- Add to the "API SCHEMAS" section at the bottom of the same file ---
 
 class TimetableSlotResponse(BaseModel):
     course_offering_id: int

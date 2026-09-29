@@ -2,13 +2,13 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlmodel import select
 from typing import List
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from sqlalchemy.exc import IntegrityError
 
 from app.core.database import get_session
 from app.api.deps import require_teacher
 from app.models.user import User, StudentProfile
-from app.models.academic import CourseOffering, Subject, Section, StudentSubjectMap, SubstituteGrant, TimetableEntry, DayOfWeek # Added TimetableEntry and DayOfWeek
+from app.models.academic import CourseOffering, Subject, Section, StudentSubjectMap, SubstituteGrant, TimetableEntry, DayOfWeek
 from app.models.attendance import (
     AttendanceSession,
     AttendanceRecord,
@@ -84,7 +84,7 @@ async def get_class_roster(
     statement = (
         select(User, StudentProfile)
         .join(StudentProfile, User.id == StudentProfile.user_id)
-        .join(StudentSubjectMap, StudentProfile.id == StudentSubjectMap.student_id)
+        .join(StudentSubjectMap, User.id == StudentSubjectMap.student_id)
         .where(StudentSubjectMap.course_offering_id == course_offering_id)
     )
     
@@ -177,7 +177,8 @@ async def sync_offline_attendance(
     await db.refresh(new_session)
 
     # 6. Process Individual Student Records
-    server_now = datetime.utcnow()
+    # Use naive UTC time to match PostgreSQL's default timestamp expectation
+    server_now = datetime.now(timezone.utc).replace(tzinfo=None)
     db_records = []
     
     for item in payload.records:
@@ -189,8 +190,14 @@ async def sync_offline_attendance(
             is_flagged = True
             flag_reason = "Student no longer enrolled in this class."
         
+        # Normalize the device time to a naive UTC datetime to match DB schema
+        if item.captured_at.tzinfo:
+            captured_at_utc = item.captured_at.astimezone(timezone.utc).replace(tzinfo=None)
+        else:
+            captured_at_utc = item.captured_at
+
         # Clock Skew Check (Flag if device clock is > 24 hours off from server time)
-        clock_diff = abs((server_now - item.captured_at).total_seconds())
+        clock_diff = abs((server_now - captured_at_utc).total_seconds())
         if clock_diff > 86400: 
             is_flagged = True
             existing_reason = flag_reason + " | " if flag_reason else ""
@@ -200,8 +207,11 @@ async def sync_offline_attendance(
             record_uuid=item.record_uuid,
             session_id=new_session.id,
             student_id=item.student_id,
+            course_offering_id=payload.course_offering_id,
+            marked_by_id=teacher_id,
+            date=payload.date,
             status=item.status,
-            captured_at=item.captured_at,
+            captured_at=captured_at_utc,
             synced_at=server_now,
             is_flagged=is_flagged,
             flag_reason=flag_reason

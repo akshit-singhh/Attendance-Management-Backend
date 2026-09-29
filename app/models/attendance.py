@@ -7,6 +7,7 @@ from pydantic import BaseModel
 class AttendanceStatus(str, Enum):
     PRESENT = "PRESENT"
     ABSENT = "ABSENT"
+    LEAVE = "LEAVE"  # FIX: Added LEAVE status
 
 class SessionStatus(str, Enum):
     DRAFT = "DRAFT"
@@ -44,6 +45,11 @@ class AttendanceRecord(SQLModel, table=True):
     record_uuid: str = Field(unique=True, index=True)
     session_id: int = Field(foreign_key="attendancesession.id")
     student_id: int = Field(foreign_key="user.id")
+    
+    # FIX: Added missing fields required by the endpoints
+    course_offering_id: int = Field(foreign_key="courseoffering.id")
+    marked_by_id: int = Field(foreign_key="user.id")
+    date: date
     
     status: AttendanceStatus
     
@@ -128,15 +134,23 @@ class CourseScheduleResponse(BaseModel):
     start_time: str    # Added
     end_time: str      # Added
     room: Optional[str] = None  # Added
-    
+
 class LeaveStatus(str, Enum):
     PENDING = "PENDING"
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
 
+# FIX: Added LeaveType Enum for duty/special leaves
+class LeaveType(str, Enum):
+    MEDICAL = "MEDICAL"
+    DUTY = "DUTY"
+    SPECIAL = "SPECIAL"
+
 class LeaveRequest(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     student_id: int = Field(foreign_key="user.id")
+    
+    leave_type: LeaveType = Field(default=LeaveType.MEDICAL) # FIX: Added leave_type
     
     start_date: date
     end_date: date
