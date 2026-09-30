@@ -18,3 +18,4 @@ uploads/*
 run_mailpit.py
 timetable_snapshots
 seed_class.py
+fix_roles.py

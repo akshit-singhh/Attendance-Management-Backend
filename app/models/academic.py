@@ -1,24 +1,51 @@
+#app/models/academic.py
+
 from sqlmodel import SQLModel, Field, Relationship
 from typing import Optional, List
 from datetime import date, time, datetime
 from pydantic import BaseModel
 from enum import Enum
 
-class Program(SQLModel, table=True):
+# --- 1. 5-Tier Hierarchical Structure ---
+
+class Department(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-    name: str = Field(index=True) 
+    name: str = Field(unique=True, index=True) 
+    code: str = Field(unique=True, index=True)  # <-- Added Code Field
+    
+    programmes: List["Programme"] = Relationship(back_populates="department")
+
+class Programme(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    department_id: int = Field(foreign_key="department.id")
+    name: str 
+    code: str = Field(unique=True, index=True)
     total_semesters: int
     
-    batches: List["Batch"] = Relationship(back_populates="program")
-
+    department: Department = Relationship(back_populates="programmes")
+    specializations: List["Specialization"] = Relationship(back_populates="programme")
+    batches: List["Batch"] = Relationship(back_populates="programme")
+class Specialization(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    programme_id: int = Field(foreign_key="programme.id")
+    name: str 
+    code: str = Field(unique=True, index=True)  # <-- Added Code Field
+    
+    programme: Programme = Relationship(back_populates="specializations")
+    batches: List["Batch"] = Relationship(back_populates="specialization")
 class Batch(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-    program_id: int = Field(foreign_key="program.id")
+    name: str = Field(index=True)  # <-- Added Batch Name (e.g., "2024-2028 Batch" or "BTECH-2024")
+    programme_id: int = Field(foreign_key="programme.id")
+    specialization_id: Optional[int] = Field(default=None, foreign_key="specialization.id")
     start_year: int
     expected_end_year: int
     
-    program: Program = Relationship(back_populates="batches")
+    programme: Programme = Relationship(back_populates="batches")
+    specialization: Optional[Specialization] = Relationship(back_populates="batches")
     sections: List["Section"] = Relationship(back_populates="batch")
+
+# --- 2. Timeline & Mapping ---
 
 class AcademicTerm(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -62,7 +89,33 @@ class SubstituteGrant(SQLModel, table=True):
     end_date: date
     granted_by_id: int = Field(foreign_key="user.id")
 
-# --- API SCHEMAS ---
+# --- 3. Timetable Additions ---
+
+class DayOfWeek(str, Enum):
+    MON = "MON"
+    TUE = "TUE"
+    WED = "WED"
+    THU = "THU"
+    FRI = "FRI"
+    SAT = "SAT"
+    SUN = "SUN"
+
+class TimetableEntry(SQLModel, table=True):
+    """One row per (course_offering, day, start_time). Deliberately thin — this
+    is planning/reference data, so it carries no status/lock fields."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    course_offering_id: int = Field(foreign_key="courseoffering.id", index=True)
+    day_of_week: DayOfWeek
+    start_time: time
+    end_time: time
+    room: Optional[str] = None
+    batch_label: Optional[str] = None  # e.g. "G-1" / "G-2" for split lab groups
+
+    # Which scrape run produced this row
+    source: str = Field(default="scrape")
+    scraped_at: Optional[datetime] = None
+
+# --- 4. API SCHEMAS ---
 
 class TermCreate(BaseModel):
     name: str
@@ -76,34 +129,6 @@ class CourseOfferingCreate(BaseModel):
     subject_id: int
     teacher_id: int
     
-class DayOfWeek(str, Enum):
-    MON = "MON"
-    TUE = "TUE"
-    WED = "WED"
-    THU = "THU"
-    FRI = "FRI"
-    SAT = "SAT"
-    SUN = "SUN"
-
-class TimetableEntry(SQLModel, table=True):
-    """One row per (course_offering, day, start_time). Deliberately thin — this
-    is planning/reference data (SRS Section 9: a timetable entry is never an
-    attendance gate), so it carries no status/lock fields."""
-    id: Optional[int] = Field(default=None, primary_key=True)
-    course_offering_id: int = Field(foreign_key="courseoffering.id", index=True)
-    day_of_week: DayOfWeek
-    start_time: time
-    end_time: time
-    room: Optional[str] = None
-    batch_label: Optional[str] = None  # e.g. "G-1" / "G-2" for split lab groups
-
-    # Which scrape run produced this row — lets a re-scrape replace exactly its
-    # own prior output without touching rows a different source (manual edit,
-    # a different scraper run) created. See scrape_and_seed_timetable.py.
-    source: str = Field(default="scrape")
-    scraped_at: Optional[datetime] = None
-
-
 class TimetableSlotResponse(BaseModel):
     course_offering_id: int
     subject_code: str
@@ -114,3 +139,4 @@ class TimetableSlotResponse(BaseModel):
     end_time: time
     room: Optional[str] = None
     batch_label: Optional[str] = None
+    

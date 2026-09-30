@@ -14,7 +14,7 @@ from app.api.v1.web import leaves as web_leaves
 from app.api.v1.mobile import leaves as mobile_leaves
 from app.api.v1.mobile import timetable as mobile_timetable
 from app.api.v1.web import timetable as web_timetable
-
+from app.api.v1.web import dashboard
 
 
 from app.create_admin import init_admin
@@ -95,6 +95,12 @@ app.include_router(
     mobile_leaves.router,
     prefix=f"{settings.API_V1_STR}/mobile/leaves",
     tags=["Mobile Student API"]
+)
+
+app.include_router(
+    dashboard.router, 
+    prefix="/api/v1/admin/dashboard", 
+    tags=["Admin Dashboard"]
 )
 
 @app.get("/")
