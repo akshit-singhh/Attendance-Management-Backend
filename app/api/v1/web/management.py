@@ -5,6 +5,7 @@ from sqlalchemy.orm import selectinload
 
 from typing import List, Optional
 from pydantic import BaseModel
+from sqlalchemy import func
 
 from app.core.database import get_session
 from app.core.security import get_password_hash
@@ -35,8 +36,6 @@ from app.models.user import (
 # SCHEMAS
 # ============================================================================
 
-# --- Academic Hierarchy Schemas ---
-
 class DepartmentCreate(BaseModel):
     name: str
     code: str
@@ -47,7 +46,7 @@ class DepartmentResponse(BaseModel):
     code: str
 
 class ProgrammeCreate(BaseModel):
-    department_code: str  # Replaced department_id
+    department_code: str  
     name: str
     code: str
     total_semesters: int
@@ -59,7 +58,7 @@ class ProgrammeResponse(BaseModel):
     department_code: str
 
 class SpecializationCreate(BaseModel):
-    programme_code: str  # Replaced programme_id
+    programme_code: str  
     name: str
     code: str
 
@@ -70,11 +69,12 @@ class SpecializationResponse(BaseModel):
     programme_code: str
 
 class BatchCreate(BaseModel):
-    name: str                   # <-- Accepts manual user input
+    name: str                   
     programme_code: str
     specialization_code: str
     start_year: int
     expected_end_year: int
+
 class SectionCreate(BaseModel):
     name: str
     batch_id: int
@@ -84,8 +84,6 @@ class SubjectCreate(BaseModel):
     course_code: str
     name: str
     is_elective: bool = False
-
-# --- Class & Enrollment Schemas ---
 
 class FacultyResponse(BaseModel):
     id: int
@@ -104,8 +102,6 @@ class CourseOfferingListResponse(BaseModel):
     subject_name: str
     teacher_name: str
 
-# --- User Provisioning Schemas ---
-
 class UserCreate(BaseModel):
     email: str
     full_name: str
@@ -114,7 +110,6 @@ class UserCreate(BaseModel):
     scope_type: ScopeTypeEnum = ScopeTypeEnum.UNIVERSITY
     scope_id: Optional[int] = None
     
-    # Required if role == RoleEnum.STUDENT
     roll_number: Optional[str] = None
     batch_id: Optional[int] = None
 
@@ -128,6 +123,12 @@ class UserResponse(BaseModel):
     scope_id: Optional[int]
     roll_number: Optional[str] = None
     batch_id: Optional[int] = None
+    
+class PaginatedUserResponse(BaseModel):
+    items: List[UserResponse]
+    total: int
+    page: int
+    size: int
 
 
 router = APIRouter()
@@ -143,12 +144,35 @@ async def create_user(
     admin_id: int = Depends(require_admin),
     db: AsyncSession = Depends(get_session)
 ):
-    """Create a user, assign their role scope, and link a student to a batch if applicable."""
+    """Create a user, assign their role scope strictly, and link a student to a batch if applicable."""
     existing_user = (await db.exec(select(User).where(User.email == payload.email))).first()
     if existing_user:
         raise HTTPException(status_code=400, detail="User with this email already exists.")
 
-    # Student-specific validations
+    # --- STRICT SCOPE ENFORCEMENT ---
+    if payload.role == RoleEnum.HOD:
+        if payload.scope_type != ScopeTypeEnum.DEPARTMENT or not payload.scope_id:
+            raise HTTPException(status_code=400, detail="HODs must have a scope_type of DEPARTMENT and a valid scope_id.")
+        dept = await db.get(Department, payload.scope_id)
+        if not dept:
+            raise HTTPException(status_code=404, detail="Invalid Department ID provided for HOD scope.")
+
+    elif payload.role == RoleEnum.COORDINATOR:
+        if payload.scope_type != ScopeTypeEnum.PROGRAM or not payload.scope_id:
+            raise HTTPException(status_code=400, detail="Coordinators must have a scope_type of PROGRAM and a valid scope_id.")
+        prog = await db.get(Programme, payload.scope_id)
+        if not prog:
+            raise HTTPException(status_code=404, detail="Invalid Programme ID provided for Coordinator scope.")
+            
+    elif payload.role == RoleEnum.ADMIN:
+        payload.scope_type = ScopeTypeEnum.UNIVERSITY
+        payload.scope_id = None
+        
+    elif payload.role == RoleEnum.TEACHER:
+        payload.scope_type = ScopeTypeEnum.ASSIGNMENT
+        payload.scope_id = None
+
+    # --- STUDENT VALIDATION ---
     if payload.role == RoleEnum.STUDENT:
         if not payload.roll_number or not payload.batch_id:
             raise HTTPException(
@@ -166,6 +190,7 @@ async def create_user(
         if existing_roll:
             raise HTTPException(status_code=400, detail="A student with this roll number already exists.")
 
+    # --- RECORD CREATION ---
     new_user = User(
         email=payload.email,
         full_name=payload.full_name,
@@ -211,30 +236,41 @@ async def create_user(
         batch_id=batch_id_out
     )
 
-@router.get("/users", response_model=List[UserResponse], tags=["Admin - User Provisioning"])
+@router.get("/users", response_model=PaginatedUserResponse, tags=["Admin - User Provisioning"])
 async def list_users(
     role: Optional[RoleEnum] = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    size: int = Query(default=50, ge=1, le=100),
     admin_id: int = Depends(require_admin),
     db: AsyncSession = Depends(get_session)
 ):
-    """List users with optional role filtering and eagerly loaded student profiles."""
-    statement = (
-        select(User)
-        .options(
-            selectinload(User.role_assignments),
-            selectinload(User.student_profile)
-        )
-        .order_by(User.full_name)
-    )
-    result = await db.exec(statement)
+    """List users with pagination, optional role filtering, and eagerly loaded student profiles."""
     
+    # 1. Base queries
+    count_stmt = select(func.count(User.id))
+    stmt = select(User).options(
+        selectinload(User.role_assignments),
+        selectinload(User.student_profile)
+    )
+
+    # 2. Apply role filter in SQL (crucial for accurate pagination)
+    if role:
+        count_stmt = count_stmt.join(RoleAssignment).where(RoleAssignment.role == role)
+        stmt = stmt.join(RoleAssignment).where(RoleAssignment.role == role)
+
+    # 3. Execute total count
+    total_users = (await db.exec(count_stmt)).one()
+
+    # 4. Apply pagination offsets and fetch the specific page
+    skip = (page - 1) * size
+    stmt = stmt.order_by(User.full_name).offset(skip).limit(size)
+    result = await db.exec(stmt)
+    
+    # 5. Format results
     users = []
     for user in result.all():
         primary_assignment = user.role_assignments[0] if user.role_assignments else None
         user_role = primary_assignment.role if primary_assignment else RoleEnum.STUDENT
-
-        if role and user_role != role:
-            continue
 
         users.append(UserResponse(
             id=user.id,
@@ -248,7 +284,12 @@ async def list_users(
             batch_id=user.student_profile.batch_id if user.student_profile else None
         ))
         
-    return users
+    return PaginatedUserResponse(
+        items=users,
+        total=total_users,
+        page=page,
+        size=size
+    )
 
 @router.patch("/users/{user_id}/deactivate", status_code=status.HTTP_200_OK, tags=["Admin - User Provisioning"])
 async def deactivate_user(
@@ -442,7 +483,6 @@ async def create_batch(
     admin_id: int = Depends(require_hod),
     db: AsyncSession = Depends(get_session)
 ):
-    # 1. Resolve and validate the Programme from code
     programme = (await db.execute(
         select(Programme).where(Programme.code == payload.programme_code.upper().strip())
     )).scalar_one_or_none()
@@ -450,7 +490,6 @@ async def create_batch(
     if not programme:
         raise HTTPException(status_code=404, detail=f"Programme '{payload.programme_code}' not found")
 
-    # 2. Resolve and validate the Specialization strictly under this programme
     spec = (await db.execute(
         select(Specialization).where(
             Specialization.code == payload.specialization_code.upper().strip(),
@@ -461,9 +500,8 @@ async def create_batch(
     if not spec:
         raise HTTPException(status_code=404, detail=f"Specialization '{payload.specialization_code}' not found under {programme.code}")
 
-    # 3. Use the exact manual name provided by the user from the frontend form
     batch = Batch(
-        name=payload.name.strip(),          # <-- Directly uses user input (e.g. "Lateral Entry")
+        name=payload.name.strip(),          
         programme_id=programme.id,
         specialization_id=spec.id,
         start_year=payload.start_year,
@@ -496,13 +534,11 @@ async def create_section(
     admin_id: int = Depends(require_hod),
     db: AsyncSession = Depends(get_session)
 ):
-    # 1. Verify Batch and Term exist
     batch = await db.get(Batch, payload.batch_id)
     term = await db.get(AcademicTerm, payload.term_id)
     if not batch or not term:
         raise HTTPException(status_code=404, detail="Invalid Batch ID or Term ID provided.")
 
-    # 2. Check for duplicate section name in the same batch & term combo
     existing = (await db.exec(
         select(Section).where(
             Section.name == payload.name.strip().upper(),
@@ -517,7 +553,6 @@ async def create_section(
             detail=f"Section '{payload.name}' already exists for this batch in the selected term."
         )
 
-    # 3. Create the section
     section = Section(
         name=payload.name.strip().upper(),
         batch_id=payload.batch_id,
@@ -556,7 +591,6 @@ async def create_term(
     admin_id: int = Depends(require_hod),
     db: AsyncSession = Depends(get_session)
 ):
-    # If this new term is set to active, deactivate all other terms first
     if payload.is_active:
         statement = select(AcademicTerm).where(AcademicTerm.is_active == True)
         active_terms = (await db.exec(statement)).all()
@@ -787,7 +821,6 @@ async def delete_department(
     if not department:
         raise HTTPException(status_code=404, detail="Department not found.")
 
-    # Check for linked programmes
     linked_programmes = (await db.exec(select(Programme).where(Programme.department_id == department_id))).first()
     if linked_programmes:
         raise HTTPException(status_code=400, detail="Cannot delete department. It is linked to one or more programmes.")
@@ -807,7 +840,6 @@ async def delete_programme(
     if not programme:
         raise HTTPException(status_code=404, detail="Programme not found.")
 
-    # Check for linked specializations
     linked_specs = (await db.exec(select(Specialization).where(Specialization.programme_id == programme_id))).first()
     if linked_specs:
         raise HTTPException(status_code=400, detail="Cannot delete programme. It is linked to one or more specializations.")
@@ -827,7 +859,6 @@ async def delete_specialization(
     if not specialization:
         raise HTTPException(status_code=404, detail="Specialization not found.")
 
-    # Check for linked batches
     linked_batches = (await db.exec(select(Batch).where(Batch.specialization_id == specialization_id))).first()
     if linked_batches:
         raise HTTPException(status_code=400, detail="Cannot delete specialization. It is linked to one or more batches.")
@@ -847,12 +878,10 @@ async def delete_batch(
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found.")
 
-    # Check for linked student profiles
     linked_students = (await db.exec(select(StudentProfile).where(StudentProfile.batch_id == batch_id))).first()
     if linked_students:
         raise HTTPException(status_code=400, detail="Cannot delete batch. Students are currently assigned to it.")
 
-    # Check for linked sections
     linked_sections = (await db.exec(select(Section).where(Section.batch_id == batch_id))).first()
     if linked_sections:
         raise HTTPException(status_code=400, detail="Cannot delete batch. Sections are currently assigned to it.")
@@ -872,7 +901,6 @@ async def delete_section(
     if not section:
         raise HTTPException(status_code=404, detail="Section not found.")
 
-    # Check for linked course offerings
     linked_courses = (await db.exec(select(CourseOffering).where(CourseOffering.section_id == section_id))).first()
     if linked_courses:
         raise HTTPException(status_code=400, detail="Cannot delete section. Course offerings are linked to it.")
@@ -892,12 +920,10 @@ async def delete_term(
     if not term:
         raise HTTPException(status_code=404, detail="Academic Term not found.")
 
-    # Check for linked sections
     linked_sections = (await db.exec(select(Section).where(Section.term_id == term_id))).first()
     if linked_sections:
         raise HTTPException(status_code=400, detail="Cannot delete term. Sections are linked to it.")
 
-    # Check for linked course offerings
     linked_courses = (await db.exec(select(CourseOffering).where(CourseOffering.term_id == term_id))).first()
     if linked_courses:
         raise HTTPException(status_code=400, detail="Cannot delete term. Course offerings are linked to it.")
@@ -917,7 +943,6 @@ async def delete_subject(
     if not subject:
         raise HTTPException(status_code=404, detail="Subject not found.")
 
-    # Check for linked course offerings
     linked_courses = (await db.exec(select(CourseOffering).where(CourseOffering.subject_id == subject_id))).first()
     if linked_courses:
         raise HTTPException(status_code=400, detail="Cannot delete subject. It is actively offered in one or more classes.")
@@ -937,7 +962,6 @@ async def delete_course_offering(
     if not offering:
         raise HTTPException(status_code=404, detail="Course offering not found.")
 
-    # Check for enrolled students
     linked_students = (await db.exec(select(StudentSubjectMap).where(StudentSubjectMap.course_offering_id == course_offering_id))).first()
     if linked_students:
         raise HTTPException(status_code=400, detail="Cannot delete course offering. Students are currently enrolled in it.")

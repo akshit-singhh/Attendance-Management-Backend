@@ -15,7 +15,7 @@ from app.api.v1.mobile import leaves as mobile_leaves
 from app.api.v1.mobile import timetable as mobile_timetable
 from app.api.v1.web import timetable as web_timetable
 from app.api.v1.web import dashboard
-
+from app.api.v1.web import audit as web_audit # <-- 1. Import the new audit router
 
 from app.create_admin import init_admin
 
@@ -101,6 +101,13 @@ app.include_router(
     dashboard.router, 
     prefix="/api/v1/admin/dashboard", 
     tags=["Admin Dashboard"]
+)
+
+# <-- 2. Register the audit logs router directly in main.py
+app.include_router(
+    web_audit.router,
+    prefix=f"{settings.API_V1_STR}/web/audit-logs",
+    tags=["Web Admin API"]
 )
 
 @app.get("/")

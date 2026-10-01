@@ -66,7 +66,12 @@ async def get_dashboard_statistics(
         .group_by(RoleAssignment.role)
     )
     role_counts_result = (await db.exec(role_counts_stmt)).all()
-    role_stats = {role.value: count for role, count in role_counts_result}
+    
+    # Safely handle the DB driver returning either an Enum object or a raw string
+    role_stats = {}
+    for role, count in role_counts_result:
+        role_key = role.value if hasattr(role, 'value') else str(role)
+        role_stats[role_key] = count
 
     return DashboardStatsResponse(
         total_users=total_users,
