@@ -241,7 +241,7 @@ async def list_users(
     role: Optional[RoleEnum] = Query(default=None),
     page: int = Query(default=1, ge=1),
     size: int = Query(default=50, ge=1, le=100),
-    admin_id: int = Depends(require_admin),
+    user_id: int = Depends(require_hod),  # <-- Changed dependency here
     db: AsyncSession = Depends(get_session)
 ):
     """List users with pagination, optional role filtering, and eagerly loaded student profiles."""

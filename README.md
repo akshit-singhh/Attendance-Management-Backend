@@ -76,9 +76,11 @@ The application follows a typical FastAPI layered structure:
   - Student-related endpoints
 
 - /api/v1/web/management
-  - User creation and activation/deactivation
-  - Academic setup: terms, offerings, subject/section management
-  - Enrollment administration
+  - User creation, student profile linking, and activation/deactivation
+  - Paginated user listing with optional role filtering
+  - Academic hierarchy: departments, programmes, specializations, batches, and sections
+  - Academic setup: terms, subjects, course offerings, faculty, and enrollments
+  - Hierarchy and academic record deletion
 
 - /api/v1/web/corrections
   - Correction management flows
@@ -87,7 +89,7 @@ The application follows a typical FastAPI layered structure:
   - Leave management endpoints
 
 - /api/v1/mobile/leaves
-  - Student leave endpoints
+  - Student medical leave application with document upload
 
 ---
 
@@ -163,17 +165,23 @@ From app/models/user.py:
 
 From app/models/academic.py:
 
+- Department -> Programme -> Specialization -> Batch -> Section hierarchy
 - AcademicTerm
 - Subject
 - Section
 - CourseOffering
 - StudentSubjectMap
 - SubstituteGrant
+- TimetableEntry
 
 From app/models/attendance.py:
 
 - AttendanceSession
 - AttendanceRecord
+- AttendanceStatus values: PRESENT, ABSENT, and LEAVE
+- AttendanceAuditLog for historical status changes
+- CorrectionRequest
+- LeaveRequest, LeaveStatus, and LeaveType
 - OfflineSyncPayload and response models
 - Session status enums and historical tracking objects
 
@@ -234,12 +242,17 @@ Web admin/HOD flows are implemented in app/api/v1/web/management.py.
 
 Examples of operations:
 
-- Create users
-- Assign a role and scope to a user
+- Create users and assign a role and scope
+- Provision students with a roll number and batch assignment
+- Enforce role scope rules: HODs belong to a department, coordinators to a programme, teachers to an assignment scope, and admins to the university scope
+- List users with optional role filtering and page/size pagination
 - Activate/deactivate accounts
-- Create academic terms
+- Create the department, programme, specialization, batch, and section hierarchy
+- Create academic terms and subjects
 - Assign teachers to course offerings
-- Manage sections, subjects, and enrollments
+- Bulk-enroll students in course offerings
+
+Most management endpoints use HOD authorization. User creation and account activation/deactivation remain admin-only where enforced by the route dependency.
 
 This layer is the institutional setup layer for the system.
 
@@ -250,6 +263,19 @@ This layer is the institutional setup layer for the system.
 The app also exposes correction-related APIs under app/api/v1/web/corrections.py, which likely supports manual approval or correction of attendance issues.
 
 These endpoints are beyond the immediate startup/auth flow, but they are part of the management and audit cycle of the system.
+
+### 7.5 Leave application and approval
+
+Students can submit leave requests through `/api/v1/mobile/leaves/apply` using `multipart/form-data`. The request includes a date range, reason, and supporting document. The document is saved under `uploads/`, and the resulting public path is stored with the leave request.
+
+Authorized coordinators, HODs, and admins can approve pending requests through the web leaves route. When a leave is approved:
+
+1. The leave request changes from `PENDING` to `APPROVED`
+2. Matching `ABSENT` attendance records within the leave date range are changed to `LEAVE`
+3. Each changed attendance record is marked as overridden
+4. An `AttendanceAuditLog` entry records the previous status, new status, reviewer, and reason
+
+This keeps attendance history traceable instead of silently changing old records.
 
 ---
 
@@ -302,6 +328,8 @@ Once running, FastAPI provides Swagger UI and OpenAPI docs:
 
 - Swagger: http://localhost:8000/docs
 - OpenAPI JSON: http://localhost:8000/api/v1/openapi.json
+
+The interactive Swagger documentation is the source of truth for exact request and response schemas. Leave application requires multipart form data and a file upload rather than a JSON body.
 
 ---
 
