@@ -25,8 +25,9 @@ def get_token_payload(credentials: HTTPAuthorizationCredentials = Depends(token_
         return payload
     except (jwt.ExpiredSignatureError, jwt.InvalidTokenError, ValidationError):
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+            status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials or token expired",
+            headers={"WWW-Authenticate": "Bearer"},
         )
 
 # Move get_current_user ABOVE the role guards so they can use it

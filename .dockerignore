@@ -1,6 +1,7 @@
 .git
 .gitignore
 .env
+.env.*
 .venv
 venv
 __pycache__
@@ -14,3 +15,6 @@ __pycache__
 uploads/*
 !uploads/medical_certificates/
 README.md
+run_mailpit.py
+seed_class.py
+fix_roles.py

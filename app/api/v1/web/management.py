@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlmodel.ext.asyncio.session import AsyncSession
-from sqlmodel import select, or_
+from sqlmodel import select, or_, delete
 from sqlalchemy.orm import selectinload
 
 from typing import List, Optional
@@ -9,8 +9,9 @@ from sqlalchemy import func
 
 from app.core.database import get_session
 from app.core.security import get_password_hash
-from app.api.deps import require_hod, require_admin
+from app.api.deps import require_hod, require_admin, require_coordinator
 from app.models.academic import (
+    School,
     Department,
     Programme,
     Specialization,
@@ -20,9 +21,10 @@ from app.models.academic import (
     Subject,
     CourseOffering,
     StudentSubjectMap,
-    TermCreate,
-    CourseOfferingCreate,
+    TimetableEntry,
+    SubstituteGrant,
 )
+from app.models.attendance import AttendanceSession
 from app.models.user import (
     User,
     RoleEnum,
@@ -33,103 +35,38 @@ from app.models.user import (
 
 
 # ============================================================================
-# SCHEMAS
+# SCHEMAS (imported from app.schemas)
 # ============================================================================
 
-class DepartmentCreate(BaseModel):
-    name: str
-    code: str
+from app.schemas.academic import (
+    SchoolCreate,
+    SchoolResponse,
+    DepartmentCreate,
+    DepartmentResponse,
+    ProgrammeCreate,
+    ProgrammeResponse,
+    SpecializationCreate,
+    SpecializationResponse,
+    BatchCreate,
+    SectionCreate,
+    SectionResponse,
+    SubjectCreate,
+    TermCreate,
+    CourseOfferingCreate,
+    FacultyResponse,
+    BulkEnrollmentCreate,
+    CourseOfferingListResponse,
+    CourseOfferingReassign,
+)
 
-class DepartmentResponse(BaseModel):
-    id: int
-    name: str
-    code: str
-
-class ProgrammeCreate(BaseModel):
-    department_code: str  
-    name: str
-    code: str
-    total_semesters: int
-
-class ProgrammeResponse(BaseModel):
-    id: int
-    name: str
-    code: str
-    department_code: str
-
-class SpecializationCreate(BaseModel):
-    programme_code: str  
-    name: str
-    code: str
-
-class SpecializationResponse(BaseModel):
-    id: int
-    name: str
-    code: str
-    programme_code: str
-
-class BatchCreate(BaseModel):
-    name: str                   
-    programme_code: str
-    specialization_code: str
-    start_year: int
-    expected_end_year: int
-
-class SectionCreate(BaseModel):
-    name: str
-    batch_id: int
-    term_id: int
-
-class SubjectCreate(BaseModel):
-    course_code: str
-    name: str
-    is_elective: bool = False
-
-class FacultyResponse(BaseModel):
-    id: int
-    full_name: str
-    email: str
-    role: RoleEnum
-
-class BulkEnrollmentCreate(BaseModel):
-    course_offering_id: int
-    student_ids: List[int]
-
-class CourseOfferingListResponse(BaseModel):
-    id: int
-    term_name: str
-    section_name: str
-    subject_name: str
-    teacher_name: str
-
-class UserCreate(BaseModel):
-    email: str
-    full_name: str
-    password: str
-    role: RoleEnum
-    scope_type: ScopeTypeEnum = ScopeTypeEnum.UNIVERSITY
-    scope_id: Optional[int] = None
-    
-    roll_number: Optional[str] = None
-    batch_id: Optional[int] = None
-
-class UserResponse(BaseModel):
-    id: int
-    email: str
-    full_name: str
-    is_active: bool
-    role: RoleEnum
-    scope_type: ScopeTypeEnum
-    scope_id: Optional[int]
-    roll_number: Optional[str] = None
-    batch_id: Optional[int] = None
-    
-class PaginatedUserResponse(BaseModel):
-    items: List[UserResponse]
-    total: int
-    page: int
-    size: int
-
+from app.schemas.user import (
+    UserCreate,
+    UserResponse,
+    PaginatedUserResponse,
+    RoleAssignmentItem,
+    RoleAssignmentResponse,
+    UpdateUserRolesRequest,
+)
 
 router = APIRouter()
 
@@ -201,18 +138,60 @@ async def create_user(
     await db.commit()
     await db.refresh(new_user)
 
-    role_assignment = RoleAssignment(
-        user_id=new_user.id,
-        role=payload.role,
-        scope_type=payload.scope_type,
-        scope_id=payload.scope_id
-    )
-    db.add(role_assignment)
+    # --- ROLE ASSIGNMENTS (Single or Multiple) ---
+    assignments_to_create = []
+    if payload.role_assignments:
+        assignments_to_create = payload.role_assignments
+    elif payload.roles:
+        # Create assignments for each role in roles list
+        for r in payload.roles:
+            st = payload.scope_type if r == payload.role else None
+            sid = payload.scope_id if r == payload.role else None
+            assignments_to_create.append(RoleAssignmentItem(role=r, scope_type=st, scope_id=sid))
+    else:
+        assignments_to_create = [
+            RoleAssignmentItem(
+                role=payload.role,
+                scope_type=payload.scope_type,
+                scope_id=payload.scope_id
+            )
+        ]
+
+    created_assignments: List[RoleAssignment] = []
+    for item in assignments_to_create:
+        st = item.scope_type
+        sid = item.scope_id
+        if item.role == RoleEnum.TEACHER:
+            st = ScopeTypeEnum.ASSIGNMENT
+            sid = None
+        elif item.role == RoleEnum.ADMIN:
+            st = ScopeTypeEnum.UNIVERSITY
+            sid = None
+        elif item.role == RoleEnum.HOD:
+            st = ScopeTypeEnum.DEPARTMENT
+            sid = sid or payload.scope_id
+        elif item.role == RoleEnum.COORDINATOR:
+            st = ScopeTypeEnum.PROGRAM
+            sid = sid or payload.scope_id
+        elif item.role == RoleEnum.DEAN:
+            st = ScopeTypeEnum.SCHOOL
+            sid = sid or payload.scope_id
+        elif item.role == RoleEnum.STUDENT:
+            st = ScopeTypeEnum.UNIVERSITY
+
+        ra = RoleAssignment(
+            user_id=new_user.id,
+            role=item.role,
+            scope_type=st or ScopeTypeEnum.UNIVERSITY,
+            scope_id=sid
+        )
+        db.add(ra)
+        created_assignments.append(ra)
 
     roll_number_out = None
     batch_id_out = None
 
-    if payload.role == RoleEnum.STUDENT:
+    if any(item.role == RoleEnum.STUDENT for item in assignments_to_create):
         student_profile = StudentProfile(
             user_id=new_user.id,
             roll_number=payload.roll_number,
@@ -224,14 +203,26 @@ async def create_user(
 
     await db.commit()
 
+    primary_ra = created_assignments[0] if created_assignments else None
+
     return UserResponse(
         id=new_user.id,
         email=new_user.email,
         full_name=new_user.full_name,
         is_active=new_user.is_active,
-        role=role_assignment.role,
-        scope_type=role_assignment.scope_type,
-        scope_id=role_assignment.scope_id,
+        role=primary_ra.role if primary_ra else RoleEnum.STUDENT,
+        scope_type=primary_ra.scope_type if primary_ra else ScopeTypeEnum.UNIVERSITY,
+        scope_id=primary_ra.scope_id if primary_ra else None,
+        roles=[a.role for a in created_assignments],
+        role_assignments=[
+            RoleAssignmentResponse(
+                id=a.id,
+                role=a.role,
+                scope_type=a.scope_type,
+                scope_id=a.scope_id
+            )
+            for a in created_assignments
+        ],
         roll_number=roll_number_out,
         batch_id=batch_id_out
     )
@@ -269,7 +260,8 @@ async def list_users(
     # 5. Format results
     users = []
     for user in result.all():
-        primary_assignment = user.role_assignments[0] if user.role_assignments else None
+        assignments = user.role_assignments or []
+        primary_assignment = assignments[0] if assignments else None
         user_role = primary_assignment.role if primary_assignment else RoleEnum.STUDENT
 
         users.append(UserResponse(
@@ -280,6 +272,16 @@ async def list_users(
             role=user_role,
             scope_type=primary_assignment.scope_type if primary_assignment else ScopeTypeEnum.UNIVERSITY,
             scope_id=primary_assignment.scope_id if primary_assignment else None,
+            roles=[a.role for a in assignments],
+            role_assignments=[
+                RoleAssignmentResponse(
+                    id=a.id,
+                    role=a.role,
+                    scope_type=a.scope_type,
+                    scope_id=a.scope_id
+                )
+                for a in assignments
+            ],
             roll_number=user.student_profile.roll_number if user.student_profile else None,
             batch_id=user.student_profile.batch_id if user.student_profile else None
         ))
@@ -327,10 +329,137 @@ async def activate_user(
     await db.commit()
     return {"status": "success", "message": f"User {user.email} has been reactivated."}
 
+@router.put("/users/{user_id}/roles", response_model=UserResponse, tags=["Admin - User Provisioning"])
+async def update_user_roles(
+    user_id: int,
+    payload: UpdateUserRolesRequest,
+    admin_id: int = Depends(require_admin),
+    db: AsyncSession = Depends(get_session)
+):
+    """Update role assignments for a user. Supports multi-roles (e.g. Teacher + Coordinator or HOD + Teacher)."""
+    user_stmt = (
+        select(User)
+        .options(selectinload(User.role_assignments), selectinload(User.student_profile))
+        .where(User.id == user_id)
+    )
+    user = (await db.exec(user_stmt)).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    if not payload.roles:
+        raise HTTPException(status_code=400, detail="User must have at least one role assigned.")
+
+    # Guard: prevent removing ADMIN role from currently logged in admin
+    if user.id == admin_id and not any(r.role == RoleEnum.ADMIN for r in payload.roles):
+        raise HTTPException(status_code=400, detail="You cannot remove the ADMIN role from your own account.")
+
+    # Delete existing role assignments
+    stmt_del = delete(RoleAssignment).where(RoleAssignment.user_id == user_id)
+    await db.exec(stmt_del)
+
+    # Insert new role assignments
+    for item in payload.roles:
+        st = item.scope_type
+        sid = item.scope_id
+        if item.role == RoleEnum.TEACHER:
+            st = ScopeTypeEnum.ASSIGNMENT
+            sid = None
+        elif item.role == RoleEnum.ADMIN:
+            st = ScopeTypeEnum.UNIVERSITY
+            sid = None
+        elif item.role == RoleEnum.HOD:
+            st = ScopeTypeEnum.DEPARTMENT
+            if not sid:
+                raise HTTPException(status_code=400, detail="Department scope is required for HOD role.")
+        elif item.role == RoleEnum.COORDINATOR:
+            st = ScopeTypeEnum.PROGRAM
+            if not sid:
+                raise HTTPException(status_code=400, detail="Programme scope is required for Coordinator role.")
+        elif item.role == RoleEnum.DEAN:
+            st = ScopeTypeEnum.SCHOOL
+        elif item.role == RoleEnum.STUDENT:
+            st = ScopeTypeEnum.UNIVERSITY
+
+        ra = RoleAssignment(
+            user_id=user.id,
+            role=item.role,
+            scope_type=st or ScopeTypeEnum.UNIVERSITY,
+            scope_id=sid
+        )
+        db.add(ra)
+
+    await db.commit()
+
+    # Re-fetch user with newly created assignments
+    reloaded_user = (await db.exec(
+        select(User)
+        .options(selectinload(User.role_assignments), selectinload(User.student_profile))
+        .where(User.id == user_id)
+    )).first()
+
+    assignments = reloaded_user.role_assignments or []
+    primary = assignments[0] if assignments else None
+
+    return UserResponse(
+        id=reloaded_user.id,
+        email=reloaded_user.email,
+        full_name=reloaded_user.full_name,
+        is_active=reloaded_user.is_active,
+        role=primary.role if primary else RoleEnum.STUDENT,
+        scope_type=primary.scope_type if primary else ScopeTypeEnum.UNIVERSITY,
+        scope_id=primary.scope_id if primary else None,
+        roles=[a.role for a in assignments],
+        role_assignments=[
+            RoleAssignmentResponse(
+                id=a.id,
+                role=a.role,
+                scope_type=a.scope_type,
+                scope_id=a.scope_id
+            )
+            for a in assignments
+        ],
+        roll_number=reloaded_user.student_profile.roll_number if reloaded_user.student_profile else None,
+        batch_id=reloaded_user.student_profile.batch_id if reloaded_user.student_profile else None
+    )
+
 
 # ============================================================================
 # 2. HOD / ADMIN: ACADEMIC HIERARCHY SETUP (FLOW / PROGRAMMES)
 # ============================================================================
+
+# --- Schools ---
+
+@router.post("/schools", status_code=status.HTTP_201_CREATED, response_model=SchoolResponse, tags=["Academic Flow - Hierarchy"])
+async def create_school(
+    payload: SchoolCreate,
+    admin_id: int = Depends(require_hod),
+    db: AsyncSession = Depends(get_session)
+):
+    existing = (await db.exec(
+        select(School).where(
+            or_(School.name == payload.name.strip(), School.code == payload.code.upper().strip())
+        )
+    )).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="School name or code already exists.")
+    
+    school = School(name=payload.name.strip(), code=payload.code.upper().strip())
+    db.add(school)
+    await db.commit()
+    await db.refresh(school)
+    
+    return SchoolResponse(id=school.id, name=school.name, code=school.code)
+
+@router.get("/schools", response_model=List[SchoolResponse], tags=["Academic Flow - Hierarchy"])
+async def get_schools(
+    admin_id: int = Depends(require_hod),
+    db: AsyncSession = Depends(get_session)
+):
+    result = await db.exec(select(School).order_by(School.name))
+    return [
+        SchoolResponse(id=s.id, name=s.name, code=s.code)
+        for s in result.all()
+    ]
 
 # --- Departments ---
 
@@ -342,28 +471,57 @@ async def create_department(
 ):
     existing = (await db.exec(
         select(Department).where(
-            or_(Department.name == payload.name, Department.code == payload.code.upper())
+            or_(Department.name == payload.name.strip(), Department.code == payload.code.upper().strip())
         )
     )).first()
     if existing:
         raise HTTPException(status_code=400, detail="Department name or code already exists.")
     
-    dept = Department(name=payload.name, code=payload.code.upper())
+    school_id = None
+    school_code = None
+    school_name = None
+    if payload.school_code:
+        school = (await db.exec(select(School).where(School.code == payload.school_code.upper().strip()))).first()
+        if not school:
+            raise HTTPException(status_code=404, detail=f"School code '{payload.school_code}' not found.")
+        school_id = school.id
+        school_code = school.code
+        school_name = school.name
+    
+    dept = Department(name=payload.name.strip(), code=payload.code.upper().strip(), school_id=school_id)
     db.add(dept)
     await db.commit()
     await db.refresh(dept)
     
-    return DepartmentResponse(id=dept.id, name=dept.name, code=dept.code)
+    return DepartmentResponse(
+        id=dept.id, 
+        name=dept.name, 
+        code=dept.code,
+        school_code=school_code,
+        school_name=school_name
+    )
 
 @router.get("/departments", response_model=List[DepartmentResponse], tags=["Academic Flow - Hierarchy"])
 async def get_departments(
+    school_code: Optional[str] = Query(default=None),
     admin_id: int = Depends(require_hod),
     db: AsyncSession = Depends(get_session)
 ):
-    result = await db.exec(select(Department).order_by(Department.name))
+    stmt = select(Department).options(selectinload(Department.school))
+    if school_code:
+        stmt = stmt.join(Department.school).where(School.code == school_code.upper().strip())
+    
+    result = await db.exec(stmt.order_by(Department.name))
+    departments = result.all()
     return [
-        DepartmentResponse(id=d.id, name=d.name, code=d.code) 
-        for d in result.all()
+        DepartmentResponse(
+            id=d.id, 
+            name=d.name, 
+            code=d.code,
+            school_code=d.school.code if d.school else None,
+            school_name=d.school.name if d.school else None
+        ) 
+        for d in departments
     ]
 
 # --- Programmes ---
@@ -565,20 +723,52 @@ async def create_section(
     
     return section
 
-@router.get("/sections", response_model=List[Section], tags=["Academic Flow - Hierarchy"])
+@router.get("/sections", response_model=List[SectionResponse], tags=["Academic Flow - Hierarchy"])
 async def get_all_sections(
     batch_id: Optional[int] = Query(default=None),
     term_id: Optional[int] = Query(default=None),
     admin_id: int = Depends(require_hod),
     db: AsyncSession = Depends(get_session)
 ):
-    stmt = select(Section)
+    stmt = (
+        select(
+            Section.id.label("id"),
+            Section.name.label("name"),
+            Section.batch_id.label("batch_id"),
+            Section.term_id.label("term_id"),
+            Batch.name.label("batch_name"),
+            Batch.start_year.label("start_year"),
+            Batch.expected_end_year.label("expected_end_year"),
+            Programme.name.label("programme_name"),
+            Programme.code.label("programme_code"),
+            AcademicTerm.name.label("term_name"),
+            AcademicTerm.is_active.label("is_term_active"),
+        )
+        .outerjoin(Batch, Section.batch_id == Batch.id)
+        .outerjoin(Programme, Batch.programme_id == Programme.id)
+        .outerjoin(AcademicTerm, Section.term_id == AcademicTerm.id)
+    )
     if batch_id:
         stmt = stmt.where(Section.batch_id == batch_id)
     if term_id:
         stmt = stmt.where(Section.term_id == term_id)
     result = await db.exec(stmt.order_by(Section.name))
-    return result.all()
+    return [
+        SectionResponse(
+            id=row.id,
+            name=row.name,
+            batch_id=row.batch_id,
+            term_id=row.term_id,
+            batch_name=row.batch_name,
+            start_year=row.start_year,
+            expected_end_year=row.expected_end_year,
+            programme_name=row.programme_name,
+            programme_code=row.programme_code,
+            term_name=row.term_name,
+            is_term_active=row.is_term_active,
+        )
+        for row in result
+    ]
 
 
 # ============================================================================
@@ -652,7 +842,7 @@ async def get_all_subjects(
 
 @router.get("/faculty", response_model=List[FacultyResponse], tags=["HOD - Academic Setup"])
 async def get_faculty_list(
-    admin_id: int = Depends(require_hod),
+    admin_id: int = Depends(require_coordinator),
     db: AsyncSession = Depends(get_session)
 ):
     allowed_roles = [RoleEnum.TEACHER, RoleEnum.COORDINATOR, RoleEnum.HOD, RoleEnum.ADMIN]
@@ -682,7 +872,7 @@ async def get_faculty_list(
 @router.post("/course-offerings", status_code=status.HTTP_201_CREATED, tags=["HOD - Academic Setup"])
 async def assign_teacher_to_class(
     payload: CourseOfferingCreate,
-    admin_id: int = Depends(require_hod),
+    admin_id: int = Depends(require_coordinator),
     db: AsyncSession = Depends(get_session)
 ):
     teacher = await db.get(User, payload.teacher_id)
@@ -691,7 +881,7 @@ async def assign_teacher_to_class(
         
     role_stmt = select(RoleAssignment).where(RoleAssignment.user_id == teacher.id)
     user_roles = [r.role for r in (await db.exec(role_stmt)).all()]
-    if not any(r in [RoleEnum.TEACHER, RoleEnum.COORDINATOR, RoleEnum.HOD] for r in user_roles):
+    if not any(r in [RoleEnum.TEACHER, RoleEnum.COORDINATOR, RoleEnum.HOD, RoleEnum.ADMIN] for r in user_roles):
         raise HTTPException(status_code=400, detail="The assigned user is not a faculty member.")
 
     term = await db.get(AcademicTerm, payload.term_id)
@@ -723,7 +913,7 @@ async def assign_teacher_to_class(
 
 @router.get("/course-offerings", response_model=List[CourseOfferingListResponse], tags=["HOD - Academic Setup"])
 async def get_all_course_offerings(
-    admin_id: int = Depends(require_hod),
+    admin_id: int = Depends(require_coordinator),
     db: AsyncSession = Depends(get_session)
 ):
     statement = (
@@ -732,7 +922,12 @@ async def get_all_course_offerings(
             AcademicTerm.name.label("term_name"),
             Section.name.label("section_name"),
             Subject.name.label("subject_name"),
-            User.full_name.label("teacher_name")
+            User.full_name.label("teacher_name"),
+            User.id.label("teacher_id"),
+            Subject.course_code.label("subject_code"),
+            CourseOffering.term_id.label("term_id"),
+            CourseOffering.section_id.label("section_id"),
+            CourseOffering.subject_id.label("subject_id")
         )
         .join(AcademicTerm, CourseOffering.term_id == AcademicTerm.id)
         .join(Section, CourseOffering.section_id == Section.id)
@@ -748,7 +943,12 @@ async def get_all_course_offerings(
             term_name=row.term_name,
             section_name=row.section_name,
             subject_name=row.subject_name,
-            teacher_name=row.teacher_name
+            teacher_name=row.teacher_name,
+            teacher_id=row.teacher_id,
+            subject_code=row.subject_code,
+            term_id=row.term_id,
+            section_id=row.section_id,
+            subject_id=row.subject_id
         )
         for row in result
     ]
@@ -810,6 +1010,25 @@ async def bulk_enroll_students(
 # ============================================================================
 # 5. SAFE DELETION ENDPOINTS
 # ============================================================================
+
+@router.delete("/schools/{school_id}", status_code=status.HTTP_200_OK, tags=["Academic Flow - Hierarchy"])
+async def delete_school(
+    school_id: int,
+    admin_id: int = Depends(require_hod),
+    db: AsyncSession = Depends(get_session)
+):
+    school = await db.get(School, school_id)
+    if not school:
+        raise HTTPException(status_code=404, detail="School not found.")
+
+    linked_departments = (await db.exec(select(Department).where(Department.school_id == school_id))).first()
+    if linked_departments:
+        raise HTTPException(status_code=400, detail="Cannot delete school. It is linked to one or more departments.")
+
+    await db.delete(school)
+    await db.commit()
+    return {"status": "success", "message": f"School '{school.name}' deleted successfully."}
+
 
 @router.delete("/departments/{department_id}", status_code=status.HTTP_200_OK, tags=["Academic Flow - Hierarchy"])
 async def delete_department(
@@ -955,17 +1174,70 @@ async def delete_subject(
 @router.delete("/course-offerings/{course_offering_id}", status_code=status.HTTP_200_OK, tags=["HOD - Academic Setup"])
 async def delete_course_offering(
     course_offering_id: int,
-    admin_id: int = Depends(require_hod),
+    admin_id: int = Depends(require_coordinator),
     db: AsyncSession = Depends(get_session)
 ):
     offering = await db.get(CourseOffering, course_offering_id)
     if not offering:
         raise HTTPException(status_code=404, detail="Course offering not found.")
 
-    linked_students = (await db.exec(select(StudentSubjectMap).where(StudentSubjectMap.course_offering_id == course_offering_id))).first()
-    if linked_students:
-        raise HTTPException(status_code=400, detail="Cannot delete course offering. Students are currently enrolled in it.")
+    # 1. Guard against deleting offerings that already have recorded attendance
+    linked_sessions = (await db.exec(
+        select(AttendanceSession).where(AttendanceSession.course_offering_id == course_offering_id)
+    )).first()
+    if linked_sessions:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete course offering. Attendance sessions have already been recorded for this class. Reassign the teacher instead."
+        )
 
+    # 2. Clean up foreign key references
+    linked_timetable = (await db.exec(
+        select(TimetableEntry).where(TimetableEntry.course_offering_id == course_offering_id)
+    )).all()
+    for entry in linked_timetable:
+        await db.delete(entry)
+
+    linked_substitutes = (await db.exec(
+        select(SubstituteGrant).where(SubstituteGrant.course_offering_id == course_offering_id)
+    )).all()
+    for sub in linked_substitutes:
+        await db.delete(sub)
+
+    linked_students = (await db.exec(
+        select(StudentSubjectMap).where(StudentSubjectMap.course_offering_id == course_offering_id)
+    )).all()
+    for mapping in linked_students:
+        await db.delete(mapping)
+
+    # 3. Safely delete the course offering
     await db.delete(offering)
     await db.commit()
     return {"status": "success", "message": "Course offering deleted successfully."}
+
+
+@router.patch("/course-offerings/{course_offering_id}/reassign", status_code=status.HTTP_200_OK, tags=["HOD - Academic Setup"])
+async def reassign_teacher_to_offering(
+    course_offering_id: int,
+    payload: CourseOfferingReassign,
+    admin_id: int = Depends(require_coordinator),
+    db: AsyncSession = Depends(get_session)
+):
+    offering = await db.get(CourseOffering, course_offering_id)
+    if not offering:
+        raise HTTPException(status_code=404, detail="Course offering not found.")
+
+    new_teacher = await db.get(User, payload.teacher_id)
+    if not new_teacher:
+        raise HTTPException(status_code=404, detail="Selected teacher not found.")
+
+    role_stmt = select(RoleAssignment).where(RoleAssignment.user_id == new_teacher.id)
+    user_roles = [r.role for r in (await db.exec(role_stmt)).all()]
+    if not any(r in [RoleEnum.TEACHER, RoleEnum.COORDINATOR, RoleEnum.HOD, RoleEnum.ADMIN] for r in user_roles):
+        raise HTTPException(status_code=400, detail="The assigned user is not a faculty member.")
+
+    offering.teacher_id = payload.teacher_id
+    db.add(offering)
+    await db.commit()
+    await db.refresh(offering)
+    return {"status": "success", "message": f"Successfully reassigned class to {new_teacher.full_name}."}

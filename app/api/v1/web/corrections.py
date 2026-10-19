@@ -18,18 +18,11 @@ from app.models.attendance import (
 
 router = APIRouter()
 
-# --- SCHEMAS ---
-class CorrectionDecisionPayload(BaseModel):
-    decision: str # "APPROVE" or "REJECT"
-    rejection_reason: Optional[str] = None # Required if decision is REJECT
-
-class CorrectionQueueResponse(BaseModel):
-    id: int
-    attendance_record_id: int
-    requested_by_name: str
-    suggested_status: str
-    reason: str
-    requested_at: datetime
+# --- SCHEMAS (imported from app.schemas.corrections) ---
+from app.schemas.corrections import (
+    CorrectionDecisionPayload,
+    CorrectionQueueResponse,
+)
 
 
 # --- ENDPOINTS ---

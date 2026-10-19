@@ -17,9 +17,15 @@ load_dotenv()
 
 # 3. Import SQLModel and ALL your model files
 from sqlmodel import SQLModel
-from app.models.user import User, StudentProfile, PasswordResetOTP, RefreshToken
-from app.models.academic import Program, Batch, AcademicTerm, Section, Subject, CourseOffering, StudentSubjectMap
-from app.models.attendance import AttendanceRecord, AttendanceAuditLog, LeaveRequest
+from app.models.user import User, StudentProfile, PasswordResetOTP, RefreshToken, RoleAssignment
+from app.models.academic import (
+    School, Department, Programme, Specialization, Batch, AcademicTerm,
+    Section, Subject, CourseOffering, StudentSubjectMap, SubstituteGrant, TimetableEntry
+)
+from app.models.attendance import (
+    AttendanceSession, AttendanceRecord, AttendanceAuditLog, CorrectionRequest
+)
+from app.models.leaves import MedicalLeave
 
 # this is the Alembic Config object
 config = context.config

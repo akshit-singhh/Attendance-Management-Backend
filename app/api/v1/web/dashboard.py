@@ -21,31 +21,15 @@ from app.models.attendance import AttendanceSession, AttendanceRecord, Correctio
 router = APIRouter()
 
 # ============================================================================
-# SCHEMAS
+# SCHEMAS (imported from app.schemas.dashboard)
 # ============================================================================
 
-class DashboardStatsResponse(BaseModel):
-    total_users: int = 0
-    active_users: int = 0
-    total_students: int = 0
-    total_teachers: int = 0
-    total_coordinators: int = 0
-    total_admins: int = 0
-
-class ActionItemsResponse(BaseModel):
-    pending_corrections: int
-    pending_leave_requests: int
-    unassigned_courses: int
-    unmapped_students: int
-
-class AttendancePulseResponse(BaseModel):
-    classes_held_today: int
-    overall_attendance_today: float
-
-class SetupHealthResponse(BaseModel):
-    active_term_name: str | None
-    batches_without_sections: int
-    empty_sections: int
+from app.schemas.dashboard import (
+    DashboardStatsResponse,
+    ActionItemsResponse,
+    AttendancePulseResponse,
+    SetupHealthResponse,
+)
 
 
 # ============================================================================

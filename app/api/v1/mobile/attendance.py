@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlmodel import select
-from typing import List
+from typing import List, Optional
 from datetime import date, datetime, timezone
 from sqlalchemy.exc import IntegrityError
 
@@ -13,44 +13,65 @@ from app.models.attendance import (
     AttendanceSession,
     AttendanceRecord,
     SessionStatus,
+    CorrectionRequest, 
+    CorrectionStatus, 
+)
+from app.schemas.attendance import (
     OfflineSyncPayload,
     StudentRosterResponse,
     CourseScheduleResponse,
-    CorrectionRequest, 
-    CorrectionRequestCreate, 
-    CorrectionStatus, 
-    SessionHistoryResponse
+    SessionHistoryResponse,
 )
+from app.schemas.corrections import CorrectionRequestCreate
 
 router = APIRouter()
 
 @router.get("/schedule", response_model=List[CourseScheduleResponse])
 async def get_daily_schedule(
-    term_id: int, 
+    term_id: Optional[int] = None, 
+    day: Optional[str] = None,
     teacher_id: int = Depends(require_teacher),
     db: AsyncSession = Depends(get_session)
 ):
     """Fetch all classes assigned to this specific teacher for the current term and day."""
     
-    # Get the current day of the week to filter today's timetable entries
-    current_day_str = "MON"
+    # Get the current or requested day of the week to filter timetable entries
+    target_day_str = (day or datetime.now().strftime("%a")).upper()
     try:
-        current_day = DayOfWeek[current_day_str]
+        current_day = DayOfWeek[target_day_str]
     except KeyError:
-        # Fallback if the system day doesn't match the Enum (unlikely but safe)
         current_day = DayOfWeek.MON
+
+    teacher = await db.get(User, teacher_id)
+    matched_teacher_ids = [teacher_id]
+    if teacher:
+        same_name_ids = (await db.exec(select(User.id).where(User.full_name == teacher.full_name))).all()
+        matched_teacher_ids = list(set(matched_teacher_ids + list(same_name_ids)))
 
     statement = (
         select(CourseOffering, Subject, Section, TimetableEntry)
         .join(Subject, CourseOffering.subject_id == Subject.id)
         .join(Section, CourseOffering.section_id == Section.id)
         .join(TimetableEntry, CourseOffering.id == TimetableEntry.course_offering_id)
-        .where(CourseOffering.teacher_id == teacher_id)
-        .where(CourseOffering.term_id == term_id)
+        .where(CourseOffering.teacher_id.in_(matched_teacher_ids))
         .where(TimetableEntry.day_of_week == current_day)
     )
+    if term_id:
+        statement = statement.where(CourseOffering.term_id == term_id)
     
-    results = await db.exec(statement)
+    results = (await db.exec(statement)).all()
+
+    # Fallback: if term_id was provided but returned empty or incomplete, query without term_id constraint
+    if not results and term_id:
+        fallback_stmt = (
+            select(CourseOffering, Subject, Section, TimetableEntry)
+            .join(Subject, CourseOffering.subject_id == Subject.id)
+            .join(Section, CourseOffering.section_id == Section.id)
+            .join(TimetableEntry, CourseOffering.id == TimetableEntry.course_offering_id)
+            .where(CourseOffering.teacher_id.in_(matched_teacher_ids))
+            .where(TimetableEntry.day_of_week == current_day)
+        )
+        results = (await db.exec(fallback_stmt)).all()
     
     schedule = []
     # Results is now a tuple of 4 objects due to the 4 selected tables
@@ -63,7 +84,10 @@ async def get_daily_schedule(
             # Serialize the time objects to strings as defined by the Pydantic model
             start_time=timetable_entry.start_time.strftime("%H:%M:%S"),
             end_time=timetable_entry.end_time.strftime("%H:%M:%S"),
-            room=timetable_entry.room
+            room=timetable_entry.room,
+            credits=subject.credits or 3,
+            course_type=offering.course_type or subject.course_type or "LECTURE",
+            weekly_hours=offering.weekly_hours,
         ))
         
     return schedule
@@ -77,8 +101,14 @@ async def get_class_roster(
 ):
     """Fetch the exact list of students enrolled in this specific course offering."""
     
+    teacher = await db.get(User, teacher_id)
+    matched_teacher_ids = [teacher_id]
+    if teacher:
+        same_name_ids = (await db.exec(select(User.id).where(User.full_name == teacher.full_name))).all()
+        matched_teacher_ids = list(set(matched_teacher_ids + list(same_name_ids)))
+
     offering = await db.get(CourseOffering, course_offering_id)
-    if not offering or offering.teacher_id != teacher_id:
+    if not offering or offering.teacher_id not in matched_teacher_ids:
         raise HTTPException(status_code=403, detail="You do not have access to this roster.")
 
     statement = (
@@ -125,11 +155,17 @@ async def sync_offline_attendance(
     if not offering:
         raise HTTPException(status_code=404, detail="Course offering not found.")
 
-    is_authorized = offering.teacher_id == teacher_id
+    teacher = await db.get(User, teacher_id)
+    matched_teacher_ids = [teacher_id]
+    if teacher:
+        same_name_ids = (await db.exec(select(User.id).where(User.full_name == teacher.full_name))).all()
+        matched_teacher_ids = list(set(matched_teacher_ids + list(same_name_ids)))
+
+    is_authorized = offering.teacher_id in matched_teacher_ids
     if not is_authorized:
         sub_stmt = select(SubstituteGrant).where(
             SubstituteGrant.course_offering_id == payload.course_offering_id,
-            SubstituteGrant.substitute_teacher_id == teacher_id,
+            SubstituteGrant.substitute_teacher_id.in_(matched_teacher_ids),
             SubstituteGrant.start_date <= payload.date,
             SubstituteGrant.end_date >= payload.date
         )

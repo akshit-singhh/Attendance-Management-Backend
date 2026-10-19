@@ -15,3 +15,7 @@ services:
         sync: false
       - key: ADMIN_NAME
         value: System Administrator
+      - key: SAMAY_API_URL
+        sync: false
+      - key: MYGBU_SCHEDULE_URL
+        sync: false

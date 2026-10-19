@@ -7,11 +7,23 @@ from app.core.database import engine
 from app.core.config import settings
 from app.models.user import User, RoleEnum, RoleAssignment, ScopeTypeEnum
 
+from sqlalchemy import text
+
 # Standard bcrypt password hasher
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 async def init_admin():
     async with AsyncSession(engine, expire_on_commit=False) as session:
+        # 0. Ensure credit and workload columns exist
+        try:
+            await session.exec(text("ALTER TABLE subject ADD COLUMN IF NOT EXISTS credits INTEGER DEFAULT 3;"))
+            await session.exec(text("ALTER TABLE subject ADD COLUMN IF NOT EXISTS course_type VARCHAR DEFAULT 'LECTURE';"))
+            await session.exec(text("ALTER TABLE courseoffering ADD COLUMN IF NOT EXISTS weekly_hours REAL DEFAULT NULL;"))
+            await session.exec(text("ALTER TABLE courseoffering ADD COLUMN IF NOT EXISTS course_type VARCHAR DEFAULT NULL;"))
+            await session.commit()
+        except Exception as e:
+            print(f"Schema migration check note: {e}")
+
         print("Checking for existing admin user...")
         
         # 1. Check if the admin already exists

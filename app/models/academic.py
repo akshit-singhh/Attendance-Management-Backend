@@ -6,13 +6,22 @@ from datetime import date, time, datetime
 from pydantic import BaseModel
 from enum import Enum
 
-# --- 1. 5-Tier Hierarchical Structure ---
+# --- 1. 6-Tier Hierarchical Structure (School -> Department -> Programme -> Specialization -> Batch -> Section) ---
+
+class School(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(unique=True, index=True)
+    code: str = Field(unique=True, index=True)  # e.g., SOICT, SOE, SOM
+
+    departments: List["Department"] = Relationship(back_populates="school")
 
 class Department(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str = Field(unique=True, index=True) 
-    code: str = Field(unique=True, index=True)  # <-- Added Code Field
+    code: str = Field(unique=True, index=True)
+    school_id: Optional[int] = Field(default=None, foreign_key="school.id")
     
+    school: Optional[School] = Relationship(back_populates="departments")
     programmes: List["Programme"] = Relationship(back_populates="department")
 
 class Programme(SQLModel, table=True):
@@ -67,13 +76,17 @@ class Subject(SQLModel, table=True):
     course_code: str = Field(unique=True, index=True)
     name: str
     is_elective: bool = Field(default=False)
+    credits: int = Field(default=3)
+    course_type: Optional[str] = Field(default="LECTURE")
 
 class CourseOffering(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     term_id: int = Field(foreign_key="academicterm.id")
     section_id: int = Field(foreign_key="section.id")
     subject_id: int = Field(foreign_key="subject.id")
-    teacher_id: int = Field(foreign_key="user.id") 
+    teacher_id: Optional[int] = Field(default=None, foreign_key="user.id")
+    weekly_hours: Optional[float] = Field(default=None)
+    course_type: Optional[str] = Field(default=None) 
 
 class StudentSubjectMap(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -114,29 +127,3 @@ class TimetableEntry(SQLModel, table=True):
     # Which scrape run produced this row
     source: str = Field(default="scrape")
     scraped_at: Optional[datetime] = None
-
-# --- 4. API SCHEMAS ---
-
-class TermCreate(BaseModel):
-    name: str
-    start_date: date
-    end_date: date
-    is_active: bool = False
-
-class CourseOfferingCreate(BaseModel):
-    term_id: int
-    section_id: int
-    subject_id: int
-    teacher_id: int
-    
-class TimetableSlotResponse(BaseModel):
-    course_offering_id: int
-    subject_code: str
-    subject_name: str
-    section_name: str
-    day_of_week: DayOfWeek
-    start_time: time
-    end_time: time
-    room: Optional[str] = None
-    batch_label: Optional[str] = None
-    

@@ -79,17 +79,6 @@ class CorrectionRequest(SQLModel, table=True):
     submitted_by_id: int = Field(foreign_key="user.id")
     applied_on: datetime = Field(default_factory=datetime.utcnow)
 
-class CorrectionRequestCreate(BaseModel):
-    attendance_record_id: int
-    suggested_status: AttendanceStatus
-    reason: str
-
-class SessionHistoryResponse(BaseModel):
-    course_offering_id: int
-    subject_name: str
-    section_name: str
-    date: date
-
 class AttendanceAuditLog(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     attendance_record_id: int = Field(foreign_key="attendancerecord.id")
@@ -101,39 +90,6 @@ class AttendanceAuditLog(SQLModel, table=True):
     
     changed_at: datetime = Field(default_factory=datetime.utcnow)
     record: AttendanceRecord = Relationship(back_populates="audit_logs")
-
-
-# --- API SCHEMAS ---
-
-class SyncRecordItem(BaseModel):
-    record_uuid: str           # Client-generated UUID for the individual student's mark
-    student_id: int
-    status: AttendanceStatus
-    captured_at: datetime      # The exact time the teacher tapped the button offline
-
-class OfflineSyncPayload(BaseModel):
-    session_uuid: str          # Client-generated UUID for the whole class session
-    course_offering_id: int
-    date: date
-    duration_periods: int = 1
-    mode: SessionMode = SessionMode.MANUAL
-    is_held: bool = True
-    reason_not_held: Optional[str] = None
-    records: List[SyncRecordItem]
-
-class StudentRosterResponse(BaseModel):
-    student_id: int
-    roll_number: str
-    full_name: str
-
-class CourseScheduleResponse(BaseModel):
-    course_offering_id: int
-    subject_name: str
-    subject_code: str
-    section_name: str
-    start_time: str    # Added
-    end_time: str      # Added
-    room: Optional[str] = None  # Added
 
 class LeaveStatus(str, Enum):
     PENDING = "PENDING"

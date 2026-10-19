@@ -14,8 +14,8 @@ from app.models.user import User, RefreshToken, PasswordResetOTP
 from app.api.deps import get_current_user
 from app.services.email_service import send_otp_email
 
-# Import all schemas from the models file
-from app.models.auth import (
+# Import schemas from app.schemas.auth
+from app.schemas.auth import (
     LoginRequest,
     TokenResponse,
     RefreshTokenRequest,
@@ -87,7 +87,9 @@ async def login(
         "token_type": "bearer",
         "must_change_password": user.must_change_password,
         "available_roles": available_roles,
-        "active_role": primary_role
+        "active_role": primary_role,
+        "user_name": user.full_name,
+        "user_email": user.email,
     }
 
 @router.post("/refresh", response_model=TokenResponse)
@@ -153,7 +155,9 @@ async def refresh_token(
         "token_type": "bearer",
         "must_change_password": user.must_change_password,
         "available_roles": available_roles,
-        "active_role": primary_role
+        "active_role": primary_role,
+        "user_name": user.full_name,
+        "user_email": user.email,
     }
 
 @router.post("/logout")
@@ -289,5 +293,7 @@ async def switch_role(
         "token_type": "bearer",
         "must_change_password": current_user.must_change_password,
         "available_roles": available_roles,
-        "active_role": target_assignment.role.value
+        "active_role": target_assignment.role.value,
+        "user_name": current_user.full_name,
+        "user_email": current_user.email,
     }

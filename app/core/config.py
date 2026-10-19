@@ -8,16 +8,20 @@ class Settings(BaseSettings):
     # Security
     SECRET_KEY: str # MUST be set in .env
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
-    REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 15 # 15 days
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 60 # 60 days (sliding session on refresh)
     
-    ADMIN_EMAIL: str = "admin@gbu.ac.in"
-    ADMIN_PASSWORD: str = "GBU123"
+    # Initial Admin Credentials (MUST be set in .env)
+    ADMIN_EMAIL: str
+    ADMIN_PASSWORD: str
     ADMIN_NAME: str = "System Administrator"
     
-    # PostgreSQL Connection String
-    # Format: postgresql+asyncpg://user:password@localhost:5432/dbname
+    # PostgreSQL Connection String (MUST be set in .env)
     DATABASE_URL: str 
+
+    # University Timetable & Schedule Integration (MUST be set in .env)
+    SAMAY_API_URL: str
+    MYGBU_SCHEDULE_URL: str
 
     class Config:
         env_file = ".env"

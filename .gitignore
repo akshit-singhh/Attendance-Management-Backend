@@ -1,21 +1,66 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Environment variables & secrets
 .env
 .env.*
 !.env.example
-.venv/
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.mypy_cache/
-.coverage
-htmlcov/
-.vscode/
-.idea/
+
+# Databases & SQLite
+*.sqlite
 *.sqlite3
 *.db
+*.db-journal
+attendance.db
+
+# Log files
 *.log
+logs/
+
+# Unit test & coverage caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Editor & OS artifacts
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# File uploads (preserve directory structure)
 uploads/*
+!uploads/.gitkeep
 !uploads/medical_certificates/
+!uploads/medical_certificates/.gitkeep
+
+# University Timetable data dumps, snapshots & runtime caches
+timetable_snapshots/
+timetableApi.txt
+get-samay-*.json
+*remarks_backup.json
+section_remarks_backup.json
+app/section_remarks_backup.json
+data/*
+!data/.gitkeep
+
+# Local / manual helper scripts
 run_mailpit.py
-timetable_snapshots
 seed_class.py
 fix_roles.py

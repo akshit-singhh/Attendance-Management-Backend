@@ -13,23 +13,11 @@ from app.models.user import User
 
 router = APIRouter()
 
-# --- REQUEST / RESPONSE SCHEMAS ---
-
-class SubjectAttendanceHistory(BaseModel):
-    subject_name: str
-    course_code: str
-    teacher_name: str
-    periods_held: int
-    periods_attended: int
-    percentage: float
-    standing: str
-
-class StudentDashboardResponse(BaseModel):
-    current_semester: str
-    overall_percentage: float
-    highest_score_subject: str
-    risk_level: str
-    subjects: List[SubjectAttendanceHistory]
+# --- REQUEST / RESPONSE SCHEMAS (imported from app.schemas.student) ---
+from app.schemas.student import (
+    SubjectAttendanceHistory,
+    StudentDashboardResponse,
+)
 
 # --- ENDPOINTS ---
 
