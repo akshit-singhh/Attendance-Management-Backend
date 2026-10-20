@@ -1,3 +1,4 @@
+import re
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlmodel import select, or_, delete
@@ -5,7 +6,7 @@ from sqlalchemy.orm import selectinload
 
 from typing import List, Optional
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import func, distinct
 
 from app.core.database import get_session
 from app.core.security import get_password_hash
@@ -57,6 +58,12 @@ from app.schemas.academic import (
     BulkEnrollmentCreate,
     CourseOfferingListResponse,
     CourseOfferingReassign,
+    StudentAcademicCourse,
+    StudentAcademicItem,
+    PaginatedStudentAcademicResponse,
+    StudentImportItem,
+    StudentBulkImportRequest,
+    StudentBulkImportResponse,
 )
 
 from app.schemas.user import (
@@ -95,11 +102,19 @@ async def create_user(
             raise HTTPException(status_code=404, detail="Invalid Department ID provided for HOD scope.")
 
     elif payload.role == RoleEnum.COORDINATOR:
-        if payload.scope_type != ScopeTypeEnum.PROGRAM or not payload.scope_id:
-            raise HTTPException(status_code=400, detail="Coordinators must have a scope_type of PROGRAM and a valid scope_id.")
-        prog = await db.get(Programme, payload.scope_id)
-        if not prog:
-            raise HTTPException(status_code=404, detail="Invalid Programme ID provided for Coordinator scope.")
+        if payload.scope_type in (ScopeTypeEnum.SECTION, None):
+            payload.scope_type = ScopeTypeEnum.SECTION
+            if not payload.scope_id:
+                raise HTTPException(status_code=400, detail="Coordinators must have a scope_type of SECTION and a valid section scope_id.")
+            sec = await db.get(Section, payload.scope_id)
+            if not sec:
+                raise HTTPException(status_code=404, detail="Invalid Section ID provided for Coordinator scope.")
+        elif payload.scope_type == ScopeTypeEnum.PROGRAM:
+            if not payload.scope_id:
+                raise HTTPException(status_code=400, detail="Coordinators must have a valid scope_id.")
+            prog = await db.get(Programme, payload.scope_id)
+            if not prog:
+                raise HTTPException(status_code=404, detail="Invalid Programme ID provided for Coordinator scope.")
             
     elif payload.role == RoleEnum.ADMIN:
         payload.scope_type = ScopeTypeEnum.UNIVERSITY
@@ -171,7 +186,7 @@ async def create_user(
             st = ScopeTypeEnum.DEPARTMENT
             sid = sid or payload.scope_id
         elif item.role == RoleEnum.COORDINATOR:
-            st = ScopeTypeEnum.PROGRAM
+            st = item.scope_type or ScopeTypeEnum.SECTION
             sid = sid or payload.scope_id
         elif item.role == RoleEnum.DEAN:
             st = ScopeTypeEnum.SCHOOL
@@ -372,9 +387,13 @@ async def update_user_roles(
             if not sid:
                 raise HTTPException(status_code=400, detail="Department scope is required for HOD role.")
         elif item.role == RoleEnum.COORDINATOR:
-            st = ScopeTypeEnum.PROGRAM
+            st = item.scope_type or ScopeTypeEnum.SECTION
             if not sid:
-                raise HTTPException(status_code=400, detail="Programme scope is required for Coordinator role.")
+                raise HTTPException(status_code=400, detail="Section scope is required for Coordinator role.")
+            if st == ScopeTypeEnum.SECTION:
+                sec = await db.get(Section, sid)
+                if not sec:
+                    raise HTTPException(status_code=404, detail="Invalid Section ID provided for Coordinator scope.")
         elif item.role == RoleEnum.DEAN:
             st = ScopeTypeEnum.SCHOOL
         elif item.role == RoleEnum.STUDENT:
@@ -648,22 +667,29 @@ async def create_batch(
     if not programme:
         raise HTTPException(status_code=404, detail=f"Programme '{payload.programme_code}' not found")
 
-    spec = (await db.execute(
-        select(Specialization).where(
-            Specialization.code == payload.specialization_code.upper().strip(),
-            Specialization.programme_id == programme.id,
-        )
-    )).scalar_one_or_none()
-    
-    if not spec:
-        raise HTTPException(status_code=404, detail=f"Specialization '{payload.specialization_code}' not found under {programme.code}")
+    spec = None
+    if payload.specialization_code and payload.specialization_code.strip():
+        spec = (await db.execute(
+            select(Specialization).where(
+                Specialization.code == payload.specialization_code.upper().strip(),
+                Specialization.programme_id == programme.id,
+            )
+        )).scalar_one_or_none()
+        
+        if not spec:
+            raise HTTPException(status_code=404, detail=f"Specialization '{payload.specialization_code}' not found under {programme.code}")
+
+    start_year = int(payload.start_year)
+    expected_end_year = int(payload.expected_end_year)
+    if expected_end_year < start_year:
+        raise HTTPException(status_code=400, detail="Expected end year cannot be earlier than start year.")
 
     batch = Batch(
         name=payload.name.strip(),          
         programme_id=programme.id,
-        specialization_id=spec.id,
-        start_year=payload.start_year,
-        expected_end_year=payload.expected_end_year,
+        specialization_id=spec.id if spec else None,
+        start_year=start_year,
+        expected_end_year=expected_end_year,
     )
     
     db.add(batch)
@@ -753,6 +779,15 @@ async def get_all_sections(
     if term_id:
         stmt = stmt.where(Section.term_id == term_id)
     result = await db.exec(stmt.order_by(Section.name))
+
+    # Fast count of distinct enrolled students per section
+    cnt_stmt = (
+        select(CourseOffering.section_id, func.count(distinct(StudentSubjectMap.student_id)))
+        .join(StudentSubjectMap, CourseOffering.id == StudentSubjectMap.course_offering_id)
+        .group_by(CourseOffering.section_id)
+    )
+    section_counts = dict((await db.exec(cnt_stmt)).all())
+
     return [
         SectionResponse(
             id=row.id,
@@ -766,6 +801,7 @@ async def get_all_sections(
             programme_code=row.programme_code,
             term_name=row.term_name,
             is_term_active=row.is_term_active,
+            enrolled_students_count=section_counts.get(row.id, 0),
         )
         for row in result
     ]
@@ -1005,6 +1041,353 @@ async def bulk_enroll_students(
         "enrolled_count": len(new_mappings),
         "skipped_duplicates": len(already_enrolled)
     }
+
+
+
+
+
+@router.get("/students", response_model=PaginatedStudentAcademicResponse, tags=["Academic Flow - Students Directory"])
+async def list_academic_students(
+    school_id: Optional[int] = Query(default=None),
+    department_id: Optional[int] = Query(default=None),
+    programme_id: Optional[int] = Query(default=None),
+    batch_id: Optional[int] = Query(default=None),
+    section_id: Optional[int] = Query(default=None),
+    subject_id: Optional[int] = Query(default=None),
+    course_offering_id: Optional[int] = Query(default=None),
+    search: Optional[str] = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    size: int = Query(default=25, ge=1, le=500),
+    user_id: int = Depends(require_coordinator),
+    db: AsyncSession = Depends(get_session)
+):
+    """List students with multi-level academic hierarchy filters (school, department, programme, batch, section, course)."""
+    school_id = school_id if isinstance(school_id, int) else None
+    department_id = department_id if isinstance(department_id, int) else None
+    programme_id = programme_id if isinstance(programme_id, int) else None
+    batch_id = batch_id if isinstance(batch_id, int) else None
+    section_id = section_id if isinstance(section_id, int) else None
+    course_offering_id = course_offering_id if isinstance(course_offering_id, int) else None
+    subject_id = subject_id if isinstance(subject_id, int) else None
+    search = search if isinstance(search, str) else None
+    page = page if isinstance(page, int) else 1
+    size = size if isinstance(size, int) else 25
+
+    base_stmt = (
+        select(User, StudentProfile, Batch, Programme, Department, School)
+        .join(StudentProfile, User.id == StudentProfile.user_id)
+        .outerjoin(Batch, StudentProfile.batch_id == Batch.id)
+        .outerjoin(Programme, Batch.programme_id == Programme.id)
+        .outerjoin(Department, Programme.department_id == Department.id)
+        .outerjoin(School, Department.school_id == School.id)
+    )
+
+    if school_id:
+        base_stmt = base_stmt.where(School.id == school_id)
+    if department_id:
+        base_stmt = base_stmt.where(Department.id == department_id)
+    if programme_id:
+        base_stmt = base_stmt.where(Programme.id == programme_id)
+    if batch_id:
+        base_stmt = base_stmt.where(Batch.id == batch_id)
+
+    if section_id:
+        enrolled_in_sec = (
+            select(StudentSubjectMap.student_id)
+            .join(CourseOffering, StudentSubjectMap.course_offering_id == CourseOffering.id)
+            .where(CourseOffering.section_id == section_id)
+        )
+        base_stmt = base_stmt.where(User.id.in_(enrolled_in_sec))
+
+    if course_offering_id:
+        enrolled_in_off = (
+            select(StudentSubjectMap.student_id)
+            .where(StudentSubjectMap.course_offering_id == course_offering_id)
+        )
+        base_stmt = base_stmt.where(User.id.in_(enrolled_in_off))
+
+    if subject_id:
+        enrolled_in_sub = (
+            select(StudentSubjectMap.student_id)
+            .join(CourseOffering, StudentSubjectMap.course_offering_id == CourseOffering.id)
+            .where(CourseOffering.subject_id == subject_id)
+        )
+        base_stmt = base_stmt.where(User.id.in_(enrolled_in_sub))
+
+    if search and search.strip():
+        q_term = f"%{search.strip().lower()}%"
+        base_stmt = base_stmt.where(
+            func.lower(User.full_name).like(q_term) |
+            func.lower(User.email).like(q_term) |
+            func.lower(StudentProfile.roll_number).like(q_term)
+        )
+
+    count_subq = base_stmt.subquery()
+    total = (await db.exec(select(func.count()).select_from(count_subq))).one()
+
+    active_subq = base_stmt.where(User.is_active == True).subquery()
+    total_active = (await db.exec(select(func.count()).select_from(active_subq))).one()
+
+    ordered_stmt = (
+        base_stmt.order_by(StudentProfile.roll_number, User.full_name)
+        .offset((page - 1) * size)
+        .limit(size)
+    )
+    rows = (await db.exec(ordered_stmt)).all()
+
+    u_ids = [u.id for u, sp, b, p, d, s in rows]
+    enrollment_map = {uid: [] for uid in u_ids}
+
+    if u_ids:
+        enroll_stmt = (
+            select(
+                StudentSubjectMap.student_id,
+                CourseOffering.id,
+                Subject.course_code,
+                Subject.name,
+                Section.name,
+                AcademicTerm.name,
+                User.full_name,
+                Subject.course_type,
+            )
+            .join(CourseOffering, StudentSubjectMap.course_offering_id == CourseOffering.id)
+            .join(Subject, CourseOffering.subject_id == Subject.id)
+            .join(Section, CourseOffering.section_id == Section.id)
+            .outerjoin(AcademicTerm, CourseOffering.term_id == AcademicTerm.id)
+            .outerjoin(User, CourseOffering.teacher_id == User.id)
+            .where(StudentSubjectMap.student_id.in_(u_ids))
+        )
+        enroll_rows = (await db.exec(enroll_stmt)).all()
+        for s_id, off_id, sub_code, sub_name, sec_name, term_name, teacher_name, c_type in enroll_rows:
+            if s_id in enrollment_map:
+                enrollment_map[s_id].append(
+                    StudentAcademicCourse(
+                        offering_id=off_id,
+                        course_code=sub_code,
+                        subject_name=sub_name,
+                        section_name=sec_name,
+                        term_name=term_name,
+                        teacher_name=teacher_name,
+                        course_type=c_type,
+                    )
+                )
+
+    items = []
+    for u, sp, b, p, d, s in rows:
+        courses = enrollment_map.get(u.id, [])
+        items.append(
+            StudentAcademicItem(
+                id=u.id,
+                full_name=u.full_name,
+                email=u.email,
+                roll_number=sp.roll_number if sp else None,
+                is_active=u.is_active,
+                batch_id=b.id if b else None,
+                batch_name=b.name if b else None,
+                programme_id=p.id if p else None,
+                programme_name=p.name if p else None,
+                programme_code=p.code if p else None,
+                department_id=d.id if d else None,
+                department_name=d.name if d else None,
+                department_code=d.code if d else None,
+                school_id=s.id if s else None,
+                school_name=s.name if s else None,
+                school_code=s.code if s else None,
+                enrolled_courses_count=len(courses),
+                enrolled_courses=courses,
+            )
+        )
+
+    return PaginatedStudentAcademicResponse(
+        items=items,
+        total=total,
+        page=page,
+        size=size,
+        total_active=total_active,
+    )
+
+
+
+
+
+@router.post("/students/bulk-import", response_model=StudentBulkImportResponse, status_code=status.HTTP_200_OK, tags=["Academic Flow - Students Directory"])
+async def bulk_import_students(
+    payload: StudentBulkImportRequest,
+    admin_id: int = Depends(require_hod),
+    db: AsyncSession = Depends(get_session)
+):
+    """Bulk import students from CSV/roster, create accounts, link batch, and optionally enroll in courses/sections."""
+    # 1. Validate Batch
+    batch = await db.get(Batch, payload.batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Selected Batch ID does not exist.")
+
+    # 2. Validate Course Offerings if provided (only enroll if explicitly selected)
+    offering_ids = list(payload.course_offering_ids or [])
+
+    # 3. Process students
+    created_count = 0
+    updated_count = 0
+    errors = []
+    processed_student_user_ids = []
+
+    # Cache existing users by email and student profiles by roll_number for speed
+    all_emails = {s.email.strip().lower() for s in payload.students if s.email and s.email.strip()}
+    all_rolls = {s.roll_number.strip().upper() for s in payload.students if s.roll_number and s.roll_number.strip()}
+
+    existing_users_by_email = {}
+    if all_emails:
+        u_stmt = select(User).where(User.email.in_(all_emails))
+        for u in (await db.exec(u_stmt)).all():
+            existing_users_by_email[u.email.lower()] = u
+
+    existing_profiles_by_roll = {}
+    if all_rolls:
+        sp_stmt = select(StudentProfile).where(StudentProfile.roll_number.in_(all_rolls))
+        for sp in (await db.exec(sp_stmt)).all():
+            existing_profiles_by_roll[sp.roll_number.upper()] = sp
+
+    seen_rolls = set()
+
+    for student_item in payload.students:
+        roll = student_item.roll_number.strip()
+        name = student_item.full_name.strip()
+        if not roll or not name:
+            errors.append(f"Skipped invalid record: roll='{roll}', name='{name}'")
+            continue
+
+        if roll.upper() in seen_rolls:
+            continue
+        seen_rolls.add(roll.upper())
+
+        raw_email = student_item.email.strip().lower() if student_item.email and student_item.email.strip() and '@' in student_item.email else None
+        if not raw_email:
+            sanitized_roll = re.sub(r'[^a-zA-Z0-9]', '', roll).lower()
+            raw_email = f"{sanitized_roll}@gbu.ac.in"
+
+        # Check existing profile or existing user
+        existing_profile = existing_profiles_by_roll.get(roll.upper())
+        existing_user = existing_users_by_email.get(raw_email)
+
+        if existing_profile:
+            # Student profile exists -> update batch and user full name
+            user = await db.get(User, existing_profile.user_id)
+            if user:
+                user.full_name = name
+                db.add(user)
+            existing_profile.batch_id = payload.batch_id
+            db.add(existing_profile)
+            updated_count += 1
+            processed_student_user_ids.append(existing_profile.user_id)
+        elif existing_user:
+            # User exists with this email -> link student profile
+            user_profile = (await db.exec(
+                select(StudentProfile).where(StudentProfile.user_id == existing_user.id)
+            )).first()
+            if user_profile:
+                user_profile.roll_number = roll
+                user_profile.batch_id = payload.batch_id
+                db.add(user_profile)
+            else:
+                new_profile = StudentProfile(
+                    user_id=existing_user.id,
+                    roll_number=roll,
+                    batch_id=payload.batch_id
+                )
+                db.add(new_profile)
+                existing_profiles_by_roll[roll.upper()] = new_profile
+
+            existing_user.full_name = name
+            db.add(existing_user)
+            updated_count += 1
+            processed_student_user_ids.append(existing_user.id)
+        else:
+            # Create new user, role assignment, and student profile
+            default_pwd = roll if len(roll) >= 6 else "GBU@12345"
+            new_user = User(
+                email=raw_email,
+                full_name=name,
+                hashed_password=get_password_hash(default_pwd),
+                is_active=True,
+                must_change_password=True
+            )
+            db.add(new_user)
+            await db.flush()  # assign new_user.id
+
+            role_assignment = RoleAssignment(
+                user_id=new_user.id,
+                role=RoleEnum.STUDENT,
+                scope_type=ScopeTypeEnum.UNIVERSITY,
+                scope_id=None
+            )
+            db.add(role_assignment)
+
+            new_profile = StudentProfile(
+                user_id=new_user.id,
+                roll_number=roll,
+                batch_id=payload.batch_id
+            )
+            db.add(new_profile)
+            existing_profiles_by_roll[roll.upper()] = new_profile
+            existing_users_by_email[raw_email] = new_user
+
+            created_count += 1
+            processed_student_user_ids.append(new_user.id)
+
+    # 4. Enroll into course offerings if any
+    total_enrolled = 0
+    if offering_ids and processed_student_user_ids:
+        for off_id in offering_ids:
+            # check existing enrollments
+            existing_enrollments = set((await db.exec(
+                select(StudentSubjectMap.student_id).where(
+                    StudentSubjectMap.course_offering_id == off_id,
+                    StudentSubjectMap.student_id.in_(processed_student_user_ids)
+                )
+            )).all())
+
+            to_enroll = set(processed_student_user_ids) - existing_enrollments
+            for s_id in to_enroll:
+                db.add(StudentSubjectMap(student_id=s_id, course_offering_id=off_id))
+                total_enrolled += 1
+
+    await db.commit()
+
+    return StudentBulkImportResponse(
+        status="success",
+        message=f"Processed {created_count + updated_count} students: {created_count} created, {updated_count} updated, {total_enrolled} course enrollments created.",
+        total_processed=created_count + updated_count,
+        created_count=created_count,
+        updated_count=updated_count,
+        enrolled_count=total_enrolled,
+        skipped_count=len(payload.students) - (created_count + updated_count),
+        errors=errors
+    )
+
+
+
+
+
+@router.delete("/students/{student_id}/courses/{offering_id}", status_code=status.HTTP_200_OK, tags=["Academic Flow - Students Directory"])
+async def unenroll_student_from_course(
+    student_id: int,
+    offering_id: int,
+    admin_id: int = Depends(require_coordinator),
+    db: AsyncSession = Depends(get_session)
+):
+    """Unenroll a student from a specific course offering."""
+    mapping = (await db.exec(
+        select(StudentSubjectMap).where(
+            StudentSubjectMap.student_id == student_id,
+            StudentSubjectMap.course_offering_id == offering_id
+        )
+    )).first()
+    if not mapping:
+        raise HTTPException(status_code=404, detail="Student is not enrolled in this course offering.")
+
+    await db.delete(mapping)
+    await db.commit()
+    return {"status": "success", "message": "Student successfully unenrolled from course."}
 
 
 # ============================================================================

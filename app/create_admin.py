@@ -14,8 +14,10 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 async def init_admin():
     async with AsyncSession(engine, expire_on_commit=False) as session:
-        # 0. Ensure credit and workload columns exist
+        # 0. Ensure credit, workload columns, and enum values exist
         try:
+            async with engine.execution_options(isolation_level="AUTOCOMMIT").connect() as conn:
+                await conn.execute(text("ALTER TYPE scopetypeenum ADD VALUE IF NOT EXISTS 'SECTION';"))
             await session.exec(text("ALTER TABLE subject ADD COLUMN IF NOT EXISTS credits INTEGER DEFAULT 3;"))
             await session.exec(text("ALTER TABLE subject ADD COLUMN IF NOT EXISTS course_type VARCHAR DEFAULT 'LECTURE';"))
             await session.exec(text("ALTER TABLE courseoffering ADD COLUMN IF NOT EXISTS weekly_hours REAL DEFAULT NULL;"))

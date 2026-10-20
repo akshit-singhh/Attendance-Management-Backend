@@ -1,8 +1,8 @@
 # app/schemas/academic.py
 
-from typing import List, Optional
+from typing import List, Optional, Union
 from datetime import date, time
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from app.models.user import RoleEnum
 from app.models.academic import DayOfWeek
 
@@ -67,9 +67,27 @@ class SpecializationResponse(BaseModel):
 class BatchCreate(BaseModel):
     name: str
     programme_code: str
-    specialization_code: str
-    start_year: int
-    expected_end_year: int
+    specialization_code: Optional[str] = None
+    start_year: Union[int, str]
+    expected_end_year: Union[int, str]
+
+    @field_validator("start_year", "expected_end_year", mode="before")
+    @classmethod
+    def parse_year(cls, v):
+        if v is None:
+            return v
+        if isinstance(v, int):
+            return v
+        s = str(v).strip()
+        if "-" in s:
+            try:
+                return int(s.split("-")[0])
+            except ValueError:
+                pass
+        try:
+            return int(s)
+        except ValueError:
+            raise ValueError(f"Invalid year format: {v}")
 
 
 class SectionCreate(BaseModel):
@@ -90,6 +108,7 @@ class SectionResponse(BaseModel):
     programme_code: Optional[str] = None
     term_name: Optional[str] = None
     is_term_active: Optional[bool] = None
+    enrolled_students_count: Optional[int] = 0
 
 
 
@@ -242,3 +261,66 @@ class TimetableSlotResponse(BaseModel):
     end_time: time
     room: Optional[str] = None
     batch_label: Optional[str] = None
+
+# --- Academic Students Directory ---
+class StudentAcademicCourse(BaseModel):
+    offering_id: int
+    course_code: str
+    subject_name: str
+    section_name: str
+    term_name: Optional[str] = None
+    teacher_name: Optional[str] = None
+    course_type: Optional[str] = None
+
+
+class StudentAcademicItem(BaseModel):
+    id: int
+    full_name: str
+    email: str
+    roll_number: Optional[str] = None
+    is_active: bool
+    batch_id: Optional[int] = None
+    batch_name: Optional[str] = None
+    programme_id: Optional[int] = None
+    programme_name: Optional[str] = None
+    programme_code: Optional[str] = None
+    department_id: Optional[int] = None
+    department_name: Optional[str] = None
+    department_code: Optional[str] = None
+    school_id: Optional[int] = None
+    school_name: Optional[str] = None
+    school_code: Optional[str] = None
+    enrolled_courses_count: int = 0
+    enrolled_courses: List[StudentAcademicCourse] = []
+
+
+class PaginatedStudentAcademicResponse(BaseModel):
+    items: List[StudentAcademicItem]
+    total: int
+    page: int
+    size: int
+    total_active: int
+
+class StudentImportItem(BaseModel):
+    roll_number: str
+    full_name: str
+    email: Optional[str] = None
+
+
+class StudentBulkImportRequest(BaseModel):
+    batch_id: int
+    section_id: Optional[int] = None
+    course_offering_ids: Optional[List[int]] = None
+    students: List[StudentImportItem]
+
+
+class StudentBulkImportResponse(BaseModel):
+    status: str
+    message: str
+    total_processed: int
+    created_count: int
+    updated_count: int
+    enrolled_count: int
+    skipped_count: int = 0
+    errors: List[str] = []
+

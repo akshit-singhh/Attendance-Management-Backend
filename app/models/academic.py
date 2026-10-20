@@ -68,6 +68,7 @@ class Section(SQLModel, table=True):
     name: str 
     batch_id: int = Field(foreign_key="batch.id")
     term_id: int = Field(foreign_key="academicterm.id")
+    samay_section_id: Optional[str] = Field(default=None, index=True)
     
     batch: Batch = Relationship(back_populates="sections")
 
@@ -127,3 +128,25 @@ class TimetableEntry(SQLModel, table=True):
     # Which scrape run produced this row
     source: str = Field(default="scrape")
     scraped_at: Optional[datetime] = None
+
+class TimetableSyncLog(SQLModel, table=True):
+    __tablename__ = "timetablesynclog"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    admin_id: Optional[int] = Field(default=None, foreign_key="user.id")
+    section_id: Optional[int] = Field(default=None, foreign_key="section.id")
+    section_name: Optional[str] = None
+    summary: str
+    created_subjects_count: int = Field(default=0)
+    created_offerings_count: int = Field(default=0)
+    created_enrollments_count: int = Field(default=0)
+    created_slots_count: int = Field(default=0)
+    created_subject_ids: str = Field(default="[]")
+    created_offering_ids: str = Field(default="[]")
+    created_mapping_ids: str = Field(default="[]")
+    created_entry_ids: str = Field(default="[]")
+    is_rolled_back: bool = Field(default=False)
+    rolled_back_at: Optional[datetime] = None
+    rolled_back_by: Optional[int] = Field(default=None, foreign_key="user.id")
+

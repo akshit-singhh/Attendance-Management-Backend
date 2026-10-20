@@ -17,6 +17,7 @@ class ScopeTypeEnum(str, Enum):
     SCHOOL = "SCHOOL"
     DEPARTMENT = "DEPARTMENT"
     PROGRAM = "PROGRAM"
+    SECTION = "SECTION"
     ASSIGNMENT = "ASSIGNMENT"
 
 class User(SQLModel, table=True):
@@ -34,7 +35,7 @@ class User(SQLModel, table=True):
     role_assignments: List["RoleAssignment"] = Relationship(back_populates="user")
 
 class RoleAssignment(SQLModel, table=True):
-    """Links a user to a role and a specific scope (e.g., HOD of CSE Dept)"""
+    """Links a user to a role and a specific scope (e.g., HOD of CSE Dept, Coordinator of Section)"""
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id")
     role: RoleEnum

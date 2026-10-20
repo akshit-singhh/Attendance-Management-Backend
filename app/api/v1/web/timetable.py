@@ -15,7 +15,13 @@ from sqlmodel import select
 from app.core.config import settings
 from app.core.database import get_session
 from app.api.deps import require_coordinator
-from app.models.academic import CourseOffering, Subject, Section, TimetableEntry
+from app.models.academic import CourseOffering, Subject, Section, TimetableEntry, StudentSubjectMap, AcademicTerm, TimetableSyncLog
+from app.models.user import User, StudentProfile
+from app.core.security import get_password_hash
+import re
+from app.models.attendance import AttendanceSession
+from sqlalchemy import func, distinct, or_
+from sqlmodel import delete
 from app.schemas.academic import TimetableSlotResponse
 
 router = APIRouter()
@@ -558,3 +564,571 @@ async def list_local_timetable(
         )
         for entry, offering, subject, section in results
     ]
+
+# ---------------------------------------------------------------------------
+# SAFE TIMETABLE SYNC & ROLLBACK (Approach A + B: Diff Preview + Snapshot + 1-Click Rollback)
+# ---------------------------------------------------------------------------
+
+class SyncApplyRequest(BaseModel):
+    section_name: str
+    samay_section_id: Optional[str] = None
+    school: Optional[str] = None
+    dept: Optional[str] = None
+    auto_enroll_students: bool = True
+
+
+@router.get("/sync/preview", tags=["Timetable - Official Sync"])
+async def preview_timetable_sync(
+    section_name: str = Query(..., description="Section Name, e.g. CS-IV-A"),
+    samay_section_id: Optional[str] = Query(default=None, description="Official portal section_id, e.g. 2433"),
+    school: Optional[str] = Query(default=None),
+    dept: Optional[str] = Query(default=None),
+    admin_id: int = Depends(require_coordinator),
+    db: AsyncSession = Depends(get_session),
+):
+    """
+    Diff Preview (Dry-Run):
+    Compares the official website timetable/remarks for this section against
+    the local database. Identifies any missing subjects or course offerings
+    that need to be added, and calculates how many section students will be auto-enrolled.
+    Additive-only: NEVER suggests deleting anything.
+    """
+    sec_name_clean = section_name.strip()
+    
+    # 1. Match local Section
+    # Pass A: If official samay_section_id provided, look up by samay_section_id first
+    section: Optional[Section] = None
+    if samay_section_id and samay_section_id.strip():
+        samay_id_clean = samay_section_id.strip()
+        sec_by_samay = (await db.exec(select(Section).where(Section.samay_section_id == samay_id_clean))).first()
+        if sec_by_samay:
+            section = sec_by_samay
+
+    # Pass B: Match by exact Section Name
+    if not section:
+        stmt = select(Section).where(func.lower(Section.name) == sec_name_clean.lower())
+        section = (await db.exec(stmt)).first()
+
+    # Pass C: Normalized match (ignoring whitespace / hyphens)
+    if not section:
+        clean_normalized = re.sub(r'[\s\-_]', '', sec_name_clean).lower()
+        all_sections_res = await db.exec(select(Section))
+        for cand in all_sections_res.all():
+            if re.sub(r'[\s\-_]', '', cand.name).lower() == clean_normalized:
+                section = cand
+                break
+
+    if not section:
+        raise HTTPException(status_code=404, detail=f"Local Section '{sec_name_clean}' not found in database.")
+
+    # Self-Healing: If section has a new or missing samay_section_id from live portal, update it!
+    if samay_section_id and samay_section_id.strip() and section.samay_section_id != samay_section_id.strip():
+        section.samay_section_id = samay_section_id.strip()
+        db.add(section)
+        await db.commit()
+        await db.refresh(section)
+
+    # 2. Get Academic Term
+    term = await db.get(AcademicTerm, section.term_id)
+    term_name = term.name if term else f"Term #{section.term_id}"
+
+    # 3. Pull official remarks and slots
+    raw_slots = get_cached_samay_data()
+
+    # Resolve official Samay Section ID (if not explicitly passed, use stored section.samay_section_id)
+    resolved_samay_id = samay_section_id.strip() if samay_section_id and samay_section_id.strip() else section.samay_section_id
+    if not resolved_samay_id:
+        for s in raw_slots:
+            s_name = (s.get("SectionName") or "").strip()
+            if s_name.lower() == sec_name_clean.lower() or s_name.lower() == section.name.lower():
+                resolved_samay_id = str(s.get("Section_Id") or "").strip()
+                if resolved_samay_id:
+                    section.samay_section_id = resolved_samay_id
+                    db.add(section)
+                    await db.commit()
+                    await db.refresh(section)
+                    break
+
+    sch = school or "SOICT"
+    dp = dept or "CSE"
+    official_remarks = []
+    if resolved_samay_id:
+        official_remarks = fetch_section_remarks(sch, dp, resolved_samay_id)
+    if not official_remarks:
+        official_remarks = fetch_section_remarks(sch, dp, section.name)
+    if not official_remarks and section.name != sec_name_clean:
+        official_remarks = fetch_section_remarks(sch, dp, sec_name_clean)
+
+    if resolved_samay_id:
+        sec_slots = [s for s in raw_slots if str(s.get("Section_Id", "")).strip() == resolved_samay_id]
+    else:
+        sec_slots = [
+            s for s in raw_slots
+            if str(s.get("SectionName", "")).strip().lower() == section.name.lower()
+            or str(s.get("SectionName", "")).strip().lower() == sec_name_clean.lower()
+        ]
+
+    official_courses_map: Dict[str, Dict[str, Any]] = {}
+    for r in official_remarks:
+        code = (r.get("subject_code") or "").strip().upper()
+        if code and code not in official_courses_map:
+            official_courses_map[code] = {
+                "course_code": code,
+                "subject_name": (r.get("subject_name") or "").strip(),
+                "teacher_name": (r.get("teacher_name") or "").strip(),
+                "teacher_abbr": (r.get("teacher_abbr") or "").strip(),
+                "activity": (r.get("activity") or "Lecture").strip().upper(),
+                "credits": int(r.get("credits")) if str(r.get("credits", "")).isdigit() else 3,
+                "weekly_hours": float(r.get("hours") or 3.0) if str(r.get("hours", "")).replace(".", "").isdigit() else 3.0,
+            }
+
+    for s in sec_slots:
+        code = (s.get("Subject_Code") or "").strip().upper()
+        if code and code not in official_courses_map:
+            act = (s.get("ActivityTag") or "Lecture").strip().upper()
+            official_courses_map[code] = {
+                "course_code": code,
+                "subject_name": (s.get("subject_name") or "").strip(),
+                "teacher_name": (s.get("TeacherName") or "").strip(),
+                "teacher_abbr": (s.get("abbr") or "").strip(),
+                "activity": act,
+                "credits": 2 if "LAB" in act else 3,
+                "weekly_hours": 4.0 if "LAB" in act else 3.0,
+            }
+
+    # 4. Query current CourseOfferings in DB for this section
+    existing_offerings_res = await db.exec(
+        select(CourseOffering, Subject, User)
+        .join(Subject, CourseOffering.subject_id == Subject.id)
+        .outerjoin(User, CourseOffering.teacher_id == User.id)
+        .where(CourseOffering.section_id == section.id, CourseOffering.term_id == section.term_id)
+    )
+    existing_offering_records = existing_offerings_res.all()
+    existing_codes = {subj.course_code.upper(): (off, subj, usr) for off, subj, usr in existing_offering_records}
+
+    # 5. Query existing Subjects in DB
+    all_subj_res = await db.exec(select(Subject))
+    existing_subjects_map = {s.course_code.upper(): s for s in all_subj_res.all()}
+
+    # 6. Calculate Diff
+    missing_subjects = []
+    missing_offerings = []
+    already_synced = []
+
+    for code, info in official_courses_map.items():
+        if code in existing_codes:
+            off, subj, usr = existing_codes[code]
+            already_synced.append({
+                "offering_id": off.id,
+                "course_code": subj.course_code,
+                "subject_name": subj.name,
+                "teacher_name": usr.full_name if usr else "Unassigned",
+                "course_type": off.course_type or subj.course_type or "LECTURE",
+                "weekly_hours": off.weekly_hours,
+            })
+        else:
+            subj_exists = code in existing_subjects_map
+            if not subj_exists:
+                missing_subjects.append({
+                    "course_code": code,
+                    "name": info["subject_name"],
+                    "course_type": info["activity"],
+                    "credits": info["credits"],
+                })
+
+            missing_offerings.append({
+                "course_code": code,
+                "subject_name": info["subject_name"],
+                "teacher_name": info["teacher_name"],
+                "teacher_abbr": info["teacher_abbr"],
+                "course_type": info["activity"],
+                "weekly_hours": info["weekly_hours"],
+                "needs_subject_creation": not subj_exists,
+            })
+
+    # 7. Count students strictly in this section (never fallback to batch to avoid cross-enrolling unrelated university students)
+    student_count_res = await db.exec(
+        select(func.count(distinct(StudentSubjectMap.student_id)))
+        .join(CourseOffering, StudentSubjectMap.course_offering_id == CourseOffering.id)
+        .where(CourseOffering.section_id == section.id)
+    )
+    students_count = student_count_res.first() or 0
+
+    return {
+        "section_id": section.id,
+        "section_name": section.name,
+        "term_id": section.term_id,
+        "term_name": term_name,
+        "official_courses_total": len(official_courses_map),
+        "missing_subjects": missing_subjects,
+        "missing_offerings": missing_offerings,
+        "already_synced_offerings": already_synced,
+        "students_in_section": students_count,
+        "auto_enroll_will_affect": students_count if missing_offerings else 0,
+        "has_changes": len(missing_offerings) > 0 or len(missing_subjects) > 0,
+    }
+
+
+@router.post("/sync/apply", tags=["Timetable - Official Sync"])
+async def apply_timetable_sync(
+    payload: SyncApplyRequest,
+    admin_id: int = Depends(require_coordinator),
+    db: AsyncSession = Depends(get_session),
+):
+    """
+    Applies the diff preview inside a safe ACID database transaction.
+    - Creates missing subjects.
+    - Creates missing course offerings and matches teachers.
+    - Auto-enrolls section students into the new offerings (if enabled).
+    - Records a snapshot into TimetableSyncLog with created IDs for 1-click rollback.
+    """
+    sec_name_clean = payload.section_name.strip()
+    
+    # 1. Match local Section
+    # Pass A: If official samay_section_id provided, look up by samay_section_id first
+    section: Optional[Section] = None
+    if payload.samay_section_id and payload.samay_section_id.strip():
+        samay_id_clean = payload.samay_section_id.strip()
+        sec_by_samay = (await db.exec(select(Section).where(Section.samay_section_id == samay_id_clean))).first()
+        if sec_by_samay:
+            section = sec_by_samay
+
+    # Pass B: Match by exact Section Name
+    if not section:
+        stmt = select(Section).where(func.lower(Section.name) == sec_name_clean.lower())
+        section = (await db.exec(stmt)).first()
+
+    # Pass C: Normalized match (ignoring whitespace / hyphens)
+    if not section:
+        clean_normalized = re.sub(r'[\s\-_]', '', sec_name_clean).lower()
+        all_sections_res = await db.exec(select(Section))
+        for cand in all_sections_res.all():
+            if re.sub(r'[\s\-_]', '', cand.name).lower() == clean_normalized:
+                section = cand
+                break
+
+    if not section:
+        raise HTTPException(status_code=404, detail=f"Section '{sec_name_clean}' not found.")
+
+    # Self-Healing: If section has a new or missing samay_section_id from live portal, update it!
+    if payload.samay_section_id and payload.samay_section_id.strip() and section.samay_section_id != payload.samay_section_id.strip():
+        section.samay_section_id = payload.samay_section_id.strip()
+        db.add(section)
+        await db.commit()
+        await db.refresh(section)
+
+    raw_slots = get_cached_samay_data()
+
+    # Resolve official Samay Section ID (if not explicitly passed, use stored section.samay_section_id)
+    resolved_samay_id = payload.samay_section_id.strip() if payload.samay_section_id and payload.samay_section_id.strip() else section.samay_section_id
+    if not resolved_samay_id:
+        for s in raw_slots:
+            s_name = (s.get("SectionName") or "").strip()
+            if s_name.lower() == sec_name_clean.lower() or s_name.lower() == section.name.lower():
+                resolved_samay_id = str(s.get("Section_Id") or "").strip()
+                if resolved_samay_id:
+                    section.samay_section_id = resolved_samay_id
+                    db.add(section)
+                    await db.commit()
+                    await db.refresh(section)
+                    break
+
+    sch = payload.school or "SOICT"
+    dp = payload.dept or "CSE"
+    official_remarks = []
+    if resolved_samay_id:
+        official_remarks = fetch_section_remarks(sch, dp, resolved_samay_id)
+    if not official_remarks:
+        official_remarks = fetch_section_remarks(sch, dp, section.name)
+    if not official_remarks and section.name != sec_name_clean:
+        official_remarks = fetch_section_remarks(sch, dp, sec_name_clean)
+
+    if resolved_samay_id:
+        sec_slots = [s for s in raw_slots if str(s.get("Section_Id", "")).strip() == resolved_samay_id]
+    else:
+        sec_slots = [
+            s for s in raw_slots
+            if str(s.get("SectionName", "")).strip().lower() == section.name.lower()
+            or str(s.get("SectionName", "")).strip().lower() == sec_name_clean.lower()
+        ]
+
+    official_courses_map: Dict[str, Dict[str, Any]] = {}
+    for r in official_remarks:
+        code = (r.get("subject_code") or "").strip().upper()
+        if code and code not in official_courses_map:
+            official_courses_map[code] = {
+                "course_code": code,
+                "subject_name": (r.get("subject_name") or "").strip(),
+                "teacher_name": (r.get("teacher_name") or "").strip(),
+                "teacher_abbr": (r.get("teacher_abbr") or "").strip(),
+                "activity": (r.get("activity") or "Lecture").strip().upper(),
+                "credits": int(r.get("credits")) if str(r.get("credits", "")).isdigit() else 3,
+                "weekly_hours": float(r.get("hours") or 3.0) if str(r.get("hours", "")).replace(".", "").isdigit() else 3.0,
+            }
+
+    for s in sec_slots:
+        code = (s.get("Subject_Code") or "").strip().upper()
+        if code and code not in official_courses_map:
+            act = (s.get("ActivityTag") or "Lecture").strip().upper()
+            official_courses_map[code] = {
+                "course_code": code,
+                "subject_name": (s.get("subject_name") or "").strip(),
+                "teacher_name": (s.get("TeacherName") or "").strip(),
+                "teacher_abbr": (s.get("abbr") or "").strip(),
+                "activity": act,
+                "credits": 2 if "LAB" in act else 3,
+                "weekly_hours": 4.0 if "LAB" in act else 3.0,
+            }
+
+    # Query current offerings
+    existing_offerings_res = await db.exec(
+        select(CourseOffering, Subject)
+        .join(Subject, CourseOffering.subject_id == Subject.id)
+        .where(CourseOffering.section_id == section.id, CourseOffering.term_id == section.term_id)
+    )
+    existing_codes = {subj.course_code.upper(): off for off, subj in existing_offerings_res.all()}
+
+    all_subj_res = await db.exec(select(Subject))
+    subjects_by_code = {s.course_code.upper(): s for s in all_subj_res.all()}
+
+    all_teachers_res = await db.exec(select(User))
+    teachers_list = all_teachers_res.all()
+
+    created_subject_ids: List[int] = []
+    created_offering_ids: List[int] = []
+    created_mapping_ids: List[int] = []
+
+    # Execute Additions
+    for code, info in official_courses_map.items():
+        if code in existing_codes:
+            continue  # Already present, ADDITIVE ONLY (never overwrite)
+
+        # 1. Subject
+        subject = subjects_by_code.get(code)
+        if not subject:
+            subject = Subject(
+                course_code=code,
+                name=info["subject_name"],
+                is_elective=False,
+                credits=info["credits"],
+                course_type=info["activity"],
+            )
+            db.add(subject)
+            await db.flush()
+            subjects_by_code[code] = subject
+            created_subject_ids.append(subject.id)
+
+        # 2. Match or Auto-Create Teacher
+        raw_t_name = (info.get("teacher_name") or "").strip()
+        matched_teacher_id: Optional[int] = None
+        if raw_t_name:
+            t_lower = raw_t_name.lower()
+            # Pass A: Exact or substring match
+            for t in teachers_list:
+                if t.full_name and (t.full_name.strip().lower() == t_lower or t_lower in t.full_name.strip().lower()):
+                    matched_teacher_id = t.id
+                    break
+
+            # Pass B: Normalized match (strip titles Dr., Prof., Er.)
+            if not matched_teacher_id:
+                clean_name = re.sub(r'^(dr\.|prof\.|er\.|mr\.|mrs\.|ms\.)\s*', '', t_lower).strip()
+                for t in teachers_list:
+                    if t.full_name:
+                        t_cand = re.sub(r'^(dr\.|prof\.|er\.|mr\.|mrs\.|ms\.)\s*', '', t.full_name.lower()).strip()
+                        if clean_name and (clean_name == t_cand or clean_name in t_cand or t_cand in clean_name):
+                            matched_teacher_id = t.id
+                            break
+
+            # Pass C: If still not matched, auto-create the faculty user account
+            if not matched_teacher_id:
+                clean_email_prefix = re.sub(r'[^a-z0-9]', '', raw_t_name.lower().replace(' ', '.')) or "faculty"
+                email_candidate = f"{clean_email_prefix}@gbu.edu"
+                counter = 1
+                while any(t.email == email_candidate for t in teachers_list):
+                    counter += 1
+                    email_candidate = f"{clean_email_prefix}{counter}@gbu.edu"
+
+                new_faculty = User(
+                    email=email_candidate,
+                    full_name=raw_t_name,
+                    hashed_password=get_password_hash("Faculty@123"),
+                    is_active=True,
+                )
+                db.add(new_faculty)
+                await db.flush()
+                teachers_list.append(new_faculty)
+                matched_teacher_id = new_faculty.id
+        else:
+            # Fallback to current admin ID if portal left teacher blank
+            matched_teacher_id = admin_id
+
+        # 3. Create CourseOffering
+        offering = CourseOffering(
+            term_id=section.term_id,
+            section_id=section.id,
+            subject_id=subject.id,
+            teacher_id=matched_teacher_id,
+            weekly_hours=info["weekly_hours"],
+            course_type=info["activity"],
+        )
+        db.add(offering)
+        await db.flush()
+        created_offering_ids.append(offering.id)
+
+    # 4. Auto-enroll existing section students if requested
+    if payload.auto_enroll_students and created_offering_ids:
+        # Strictly get students already enrolled in any course belonging to this section
+        student_ids_res = await db.exec(
+            select(distinct(StudentSubjectMap.student_id))
+            .join(CourseOffering, StudentSubjectMap.course_offering_id == CourseOffering.id)
+            .where(CourseOffering.section_id == section.id)
+        )
+        student_ids = list(student_ids_res.all())
+
+        existing_maps_res = await db.exec(
+            select(StudentSubjectMap.student_id, StudentSubjectMap.course_offering_id)
+            .where(StudentSubjectMap.course_offering_id.in_(created_offering_ids))
+        )
+        existing_pair_set = set(existing_maps_res.all())
+
+        new_mappings = []
+        for off_id in created_offering_ids:
+            for sid in student_ids:
+                if (sid, off_id) not in existing_pair_set:
+                    mapping = StudentSubjectMap(student_id=sid, course_offering_id=off_id)
+                    db.add(mapping)
+                    new_mappings.append(mapping)
+                    existing_pair_set.add((sid, off_id))
+
+        if new_mappings:
+            await db.flush()
+            created_mapping_ids = [m.id for m in new_mappings]
+
+    summary = f"Synced {section.name}: Added {len(created_subject_ids)} subjects, {len(created_offering_ids)} offerings, and {len(created_mapping_ids)} student enrollments."
+    sync_log = TimetableSyncLog(
+        admin_id=admin_id,
+        section_id=section.id,
+        section_name=section.name,
+        summary=summary,
+        created_subjects_count=len(created_subject_ids),
+        created_offerings_count=len(created_offering_ids),
+        created_enrollments_count=len(created_mapping_ids),
+        created_subject_ids=json.dumps(created_subject_ids),
+        created_offering_ids=json.dumps(created_offering_ids),
+        created_mapping_ids=json.dumps(created_mapping_ids),
+    )
+    db.add(sync_log)
+    await db.commit()
+    await db.refresh(sync_log)
+
+    return {
+        "status": "success",
+        "sync_id": sync_log.id,
+        "summary": summary,
+        "created_subjects_count": len(created_subject_ids),
+        "created_offerings_count": len(created_offering_ids),
+        "created_enrollments_count": len(created_mapping_ids),
+        "is_rolled_back": False,
+        "created_at": sync_log.created_at.isoformat(),
+    }
+
+
+@router.get("/sync/history", tags=["Timetable - Official Sync"])
+async def get_sync_history(
+    limit: int = Query(default=20, le=100),
+    admin_id: int = Depends(require_coordinator),
+    db: AsyncSession = Depends(get_session),
+):
+    """Returns previous timetable sync logs with rollback status."""
+    stmt = (
+        select(TimetableSyncLog, User)
+        .outerjoin(User, TimetableSyncLog.admin_id == User.id)
+        .order_by(TimetableSyncLog.created_at.desc())
+        .limit(limit)
+    )
+    results = (await db.exec(stmt)).all()
+
+    history = []
+    for log, admin in results:
+        history.append({
+            "id": log.id,
+            "created_at": log.created_at.isoformat() if log.created_at else None,
+            "admin_name": admin.full_name if admin else "Admin",
+            "section_id": log.section_id,
+            "section_name": log.section_name,
+            "summary": log.summary,
+            "created_subjects_count": log.created_subjects_count,
+            "created_offerings_count": log.created_offerings_count,
+            "created_enrollments_count": log.created_enrollments_count,
+            "is_rolled_back": log.is_rolled_back,
+            "rolled_back_at": log.rolled_back_at.isoformat() if log.rolled_back_at else None,
+        })
+    return history
+
+
+@router.post("/sync/rollback/{sync_id}", tags=["Timetable - Official Sync"])
+async def rollback_timetable_sync(
+    sync_id: int,
+    admin_id: int = Depends(require_coordinator),
+    db: AsyncSession = Depends(get_session),
+):
+    """
+    Rolls back a specific sync:
+    - Protects attendance records (aborts if attendance was already marked on any created course).
+    - Removes created student enrollments and course offerings.
+    - Removes created subjects if not used anywhere else.
+    - Marks sync log as rolled back.
+    """
+    log = await db.get(TimetableSyncLog, sync_id)
+    if not log:
+        raise HTTPException(status_code=404, detail="Sync log record not found.")
+
+    if log.is_rolled_back:
+        raise HTTPException(status_code=400, detail=f"This sync was already rolled back on {log.rolled_back_at}.")
+
+    created_offering_ids = json.loads(log.created_offering_ids or "[]")
+    created_mapping_ids = json.loads(log.created_mapping_ids or "[]")
+    created_subject_ids = json.loads(log.created_subject_ids or "[]")
+
+    if created_offering_ids:
+        att_sessions = (await db.exec(
+            select(AttendanceSession).where(AttendanceSession.course_offering_id.in_(created_offering_ids))
+        )).all()
+        if att_sessions:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot rollback: {len(att_sessions)} attendance session(s) have already been recorded on these courses. Rollback aborted to prevent data loss."
+            )
+
+    if created_mapping_ids:
+        await db.exec(
+            delete(StudentSubjectMap).where(StudentSubjectMap.id.in_(created_mapping_ids))
+        )
+
+    if created_offering_ids:
+        await db.exec(
+            delete(CourseOffering).where(CourseOffering.id.in_(created_offering_ids))
+        )
+
+    for sub_id in created_subject_ids:
+        other_off = (await db.exec(
+            select(CourseOffering).where(CourseOffering.subject_id == sub_id)
+        )).first()
+        if not other_off:
+            subj_to_del = await db.get(Subject, sub_id)
+            if subj_to_del:
+                await db.delete(subj_to_del)
+
+    log.is_rolled_back = True
+    log.rolled_back_at = datetime.utcnow()
+    log.rolled_back_by = admin_id
+    db.add(log)
+
+    await db.commit()
+
+    return {
+        "status": "success",
+        "message": f"Successfully rolled back sync #{sync_id} ({log.section_name}).",
+        "rolled_back_at": log.rolled_back_at.isoformat(),
+    }
+

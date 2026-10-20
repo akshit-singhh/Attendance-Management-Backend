@@ -45,6 +45,12 @@ from app.schemas.academic import (
     StudentCreditAuditItem,
     StudentCreditAuditResponse,
     SyncCreditsResult,
+    StudentAcademicCourse,
+    StudentAcademicItem,
+    PaginatedStudentAcademicResponse,
+    StudentImportItem,
+    StudentBulkImportRequest,
+    StudentBulkImportResponse,
 )
 
 from app.schemas.attendance import (

@@ -55,33 +55,24 @@ async def get_daily_schedule(
         .join(TimetableEntry, CourseOffering.id == TimetableEntry.course_offering_id)
         .where(CourseOffering.teacher_id.in_(matched_teacher_ids))
         .where(TimetableEntry.day_of_week == current_day)
+        .order_by(TimetableEntry.start_time)
     )
-    if term_id:
-        statement = statement.where(CourseOffering.term_id == term_id)
-    
     results = (await db.exec(statement)).all()
 
-    # Fallback: if term_id was provided but returned empty or incomplete, query without term_id constraint
-    if not results and term_id:
-        fallback_stmt = (
-            select(CourseOffering, Subject, Section, TimetableEntry)
-            .join(Subject, CourseOffering.subject_id == Subject.id)
-            .join(Section, CourseOffering.section_id == Section.id)
-            .join(TimetableEntry, CourseOffering.id == TimetableEntry.course_offering_id)
-            .where(CourseOffering.teacher_id.in_(matched_teacher_ids))
-            .where(TimetableEntry.day_of_week == current_day)
-        )
-        results = (await db.exec(fallback_stmt)).all()
-    
     schedule = []
-    # Results is now a tuple of 4 objects due to the 4 selected tables
+    seen = set()
+    # Results is a tuple of (CourseOffering, Subject, Section, TimetableEntry)
     for offering, subject, section, timetable_entry in results:
+        # Deduplicate identical timeslots if course offerings exist across multiple terms
+        key = (timetable_entry.start_time, subject.course_code, section.name)
+        if key in seen:
+            continue
+        seen.add(key)
         schedule.append(CourseScheduleResponse(
             course_offering_id=offering.id,
             subject_name=subject.name,
             subject_code=subject.course_code,
             section_name=section.name,
-            # Serialize the time objects to strings as defined by the Pydantic model
             start_time=timetable_entry.start_time.strftime("%H:%M:%S"),
             end_time=timetable_entry.end_time.strftime("%H:%M:%S"),
             room=timetable_entry.room,
