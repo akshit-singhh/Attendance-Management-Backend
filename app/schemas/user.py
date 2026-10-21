@@ -28,6 +28,7 @@ class UserCreate(BaseModel):
     scope_type: ScopeTypeEnum = ScopeTypeEnum.UNIVERSITY
     scope_id: Optional[int] = None
     roll_number: Optional[str] = None
+    employee_code: Optional[str] = None
     batch_id: Optional[int] = None
 
 
@@ -46,6 +47,7 @@ class UserResponse(BaseModel):
     roles: List[RoleEnum] = []
     role_assignments: List[RoleAssignmentResponse] = []
     roll_number: Optional[str] = None
+    employee_code: Optional[str] = None
     batch_id: Optional[int] = None
 
 
@@ -54,3 +56,17 @@ class PaginatedUserResponse(BaseModel):
     total: int
     page: int
     size: int
+
+
+class AdminUpdateUserPasswordRequest(BaseModel):
+    new_password: str
+    must_change_password: Optional[bool] = False
+
+
+class AdminUpdateUserProfileRequest(BaseModel):
+    full_name: Optional[str] = None
+    email: Optional[str] = None
+    roll_number: Optional[str] = None
+    employee_code: Optional[str] = None
+    new_password: Optional[str] = None
+    must_change_password: Optional[bool] = None

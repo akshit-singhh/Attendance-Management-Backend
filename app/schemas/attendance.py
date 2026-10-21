@@ -52,6 +52,21 @@ class SessionHistoryResponse(BaseModel):
     date: date
 
 
+class PendingClassResponse(BaseModel):
+    course_offering_id: int
+    subject_name: str
+    subject_code: str
+    section_name: str
+    date: str
+    formatted_date: str
+    day_name: str
+    start_time: str
+    end_time: str
+    room: Optional[str] = "TBA"
+    days_remaining: int
+    is_expiring_soon: bool
+
+
 # --- Admin / Coordinator Live Attendance Session Views ---
 
 class AttendanceSessionItemResponse(BaseModel):

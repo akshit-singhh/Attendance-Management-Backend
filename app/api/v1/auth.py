@@ -4,13 +4,16 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlmodel.ext.asyncio.session import AsyncSession
-from sqlmodel import select, delete
+from sqlmodel import select, delete, func
+from sqlalchemy import case
 from sqlalchemy.orm import selectinload
 
 from app.core.database import get_session
 from app.core.config import settings
 from app.core.security import verify_password, create_access_token, create_refresh_token, get_password_hash
-from app.models.user import User, RefreshToken, PasswordResetOTP
+from app.models.user import User, RefreshToken, PasswordResetOTP, RoleEnum, StudentProfile
+from app.models.academic import CourseOffering, TimetableEntry, Batch, Programme
+from app.models.attendance import AttendanceRecord, AttendanceSession, SessionStatus, AttendanceStatus
 from app.api.deps import get_current_user
 from app.services.email_service import send_otp_email
 
@@ -22,7 +25,8 @@ from app.schemas.auth import (
     ChangePasswordRequest,
     ForgotPasswordRequest,
     ResetPasswordRequest,
-    SwitchRoleRequest
+    SwitchRoleRequest,
+    UserProfileResponse
 )
 
 router = APIRouter()
@@ -64,7 +68,10 @@ async def login(
         for ra in user.role_assignments
     ]
 
-    primary_assignment = user.role_assignments[0] if user.role_assignments else None
+    # Prioritize TEACHER > STUDENT > other roles for primary active role
+    teacher_ra = next((ra for ra in user.role_assignments if ra.role == RoleEnum.TEACHER), None)
+    student_ra = next((ra for ra in user.role_assignments if ra.role == RoleEnum.STUDENT), None)
+    primary_assignment = teacher_ra or student_ra or (user.role_assignments[0] if user.role_assignments else None)
     primary_role = primary_assignment.role.value if primary_assignment else "USER"
 
     access_token = create_access_token(subject=user.id, role=primary_role)
@@ -297,3 +304,116 @@ async def switch_role(
         "user_name": current_user.full_name,
         "user_email": current_user.email,
     }
+
+
+@router.get("/me", response_model=UserProfileResponse)
+async def get_my_profile(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session)
+):
+    """
+    Returns full profile details for the authenticated user,
+    including all assigned roles (e.g. Teacher + Coordinator),
+    institutional affiliation, and academic/teaching statistics.
+    """
+    stmt = select(User).options(selectinload(User.role_assignments)).where(User.id == current_user.id)
+    user = (await db.exec(stmt)).first() or current_user
+
+    roles = [ra.role.value for ra in user.role_assignments]
+    
+    if RoleEnum.TEACHER.value in roles:
+        primary = RoleEnum.TEACHER.value
+    elif RoleEnum.STUDENT.value in roles:
+        primary = RoleEnum.STUDENT.value
+    else:
+        primary = roles[0] if roles else "USER"
+
+    total_courses = None
+    weekly_hours = None
+    roll_number = None
+    program_name = None
+    batch_name = None
+    overall_attendance_pct = None
+
+    # Check if teacher/faculty
+    matched_teacher_ids = [user.id]
+    if user.full_name:
+        same_name_ids = (await db.exec(select(User.id).where(User.full_name == user.full_name))).all()
+        matched_teacher_ids = list(set(matched_teacher_ids + list(same_name_ids)))
+
+    co_stmt = select(CourseOffering).where(CourseOffering.teacher_id.in_(matched_teacher_ids))
+    teacher_offerings = (await db.exec(co_stmt)).all()
+
+    if teacher_offerings:
+        offering_ids = [co.id for co in teacher_offerings]
+        total_courses = len(teacher_offerings)
+        tt_stmt = select(TimetableEntry).where(TimetableEntry.course_offering_id.in_(offering_ids))
+        tt_entries = (await db.exec(tt_stmt)).all()
+        weekly_hours = float(len(tt_entries))
+
+    # Check if student
+    sp_stmt = select(StudentProfile).where(StudentProfile.user_id == user.id)
+    student_profile = (await db.exec(sp_stmt)).first()
+
+    if student_profile:
+        roll_number = student_profile.roll_number
+        if student_profile.batch_id:
+            batch = await db.get(Batch, student_profile.batch_id)
+            if batch:
+                batch_name = batch.name
+                if batch.programme_id:
+                    prog = await db.get(Programme, batch.programme_id)
+                    if prog:
+                        program_name = prog.name
+
+        # Calculate student overall attendance percentage
+        att_stmt = (
+            select(
+                func.sum(
+                    case(
+                        (
+                            (AttendanceSession.is_held == True) & 
+                            (AttendanceSession.status == SessionStatus.SUBMITTED), 
+                            AttendanceSession.duration_periods
+                        ),
+                        else_=0
+                    )
+                ).label("held"),
+                func.sum(
+                    case(
+                        (
+                            (AttendanceSession.is_held == True) & 
+                            (AttendanceSession.status == SessionStatus.SUBMITTED) & 
+                            (AttendanceRecord.status == AttendanceStatus.PRESENT), 
+                            AttendanceSession.duration_periods
+                        ),
+                        else_=0
+                    )
+                ).label("attended")
+            )
+            .select_from(AttendanceRecord)
+            .join(AttendanceSession, AttendanceRecord.session_id == AttendanceSession.id)
+            .where(AttendanceRecord.student_id == user.id)
+        )
+        res = (await db.exec(att_stmt)).first()
+        if res and res.held and res.held > 0:
+            overall_attendance_pct = round((float(res.attended or 0) / float(res.held)) * 100.0, 1)
+        elif res and res.held == 0:
+            overall_attendance_pct = 100.0
+
+    return UserProfileResponse(
+        user_id=user.id,
+        full_name=user.full_name,
+        email=user.email,
+        roles=roles,
+        primary_role=primary,
+        department="Computer Science and Engineering",
+        school="School of Information and Communication Technology",
+        total_courses=total_courses,
+        weekly_hours=weekly_hours,
+        roll_number=roll_number,
+        employee_code=user.employee_code,
+        program_name=program_name,
+        batch_name=batch_name,
+        overall_attendance_pct=overall_attendance_pct,
+    )

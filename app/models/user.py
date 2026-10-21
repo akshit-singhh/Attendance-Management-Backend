@@ -25,6 +25,7 @@ class User(SQLModel, table=True):
     email: str = Field(unique=True, index=True)
     hashed_password: str
     full_name: str
+    employee_code: Optional[str] = Field(default=None, index=True)
     
     is_active: bool = Field(default=True)
     must_change_password: bool = Field(default=True)

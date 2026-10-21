@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlmodel import select
 from typing import List, Optional
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, timedelta
 from sqlalchemy.exc import IntegrityError
 
 from app.core.database import get_session
@@ -21,6 +21,7 @@ from app.schemas.attendance import (
     StudentRosterResponse,
     CourseScheduleResponse,
     SessionHistoryResponse,
+    PendingClassResponse,
 )
 from app.schemas.corrections import CorrectionRequestCreate
 
@@ -84,6 +85,99 @@ async def get_daily_schedule(
     return schedule
 
 
+@router.get("/pending", response_model=List[PendingClassResponse])
+async def get_pending_classes(
+    teacher_id: int = Depends(require_teacher),
+    db: AsyncSession = Depends(get_session)
+):
+    """
+    Fetch all classes conducted within the last 15 days where attendance has not yet been marked.
+    Classes older than 15 days expire and are excluded from marking.
+    """
+    teacher = await db.get(User, teacher_id)
+    matched_teacher_ids = [teacher_id]
+    if teacher:
+        same_name_ids = (await db.exec(select(User.id).where(User.full_name == teacher.full_name))).all()
+        matched_teacher_ids = list(set(matched_teacher_ids + list(same_name_ids)))
+
+    # Fetch all timetable entries for this teacher
+    stmt = (
+        select(CourseOffering, Subject, Section, TimetableEntry)
+        .join(Subject, CourseOffering.subject_id == Subject.id)
+        .join(Section, CourseOffering.section_id == Section.id)
+        .join(TimetableEntry, CourseOffering.id == TimetableEntry.course_offering_id)
+        .where(CourseOffering.teacher_id.in_(matched_teacher_ids))
+        .order_by(TimetableEntry.start_time)
+    )
+    all_tts = (await db.exec(stmt)).all()
+
+    DAY_OF_WEEK_MAP = {
+        0: DayOfWeek.MON,
+        1: DayOfWeek.TUE,
+        2: DayOfWeek.WED,
+        3: DayOfWeek.THU,
+        4: DayOfWeek.FRI,
+        5: DayOfWeek.SAT,
+    }
+
+    now = datetime.now()
+    today = now.date()
+
+    # Pre-fetch existing attendance sessions for these offerings over the last 16 days
+    min_date = today - timedelta(days=16)
+    offering_ids = [co.id for co, _, _, _ in all_tts]
+    existing_sessions = set()
+    if offering_ids:
+        sess_stmt = select(AttendanceSession.course_offering_id, AttendanceSession.date).where(
+            AttendanceSession.course_offering_id.in_(offering_ids),
+            AttendanceSession.date >= min_date,
+            AttendanceSession.status != SessionStatus.DRAFT
+        )
+        for row in (await db.exec(sess_stmt)).all():
+            existing_sessions.add((row[0], row[1]))
+
+    pending = []
+    # Check each day in the 15-day grace window (day_offset 0 to 14)
+    for day_offset in range(15):
+        target_date = today - timedelta(days=day_offset)
+        weekday = target_date.weekday()
+        if weekday not in DAY_OF_WEEK_MAP:
+            continue
+        target_dow = DAY_OF_WEEK_MAP[weekday]
+
+        for co, sub, sec, tte in all_tts:
+            if tte.day_of_week != target_dow:
+                continue
+
+            # If today, only include if class start time has already passed
+            if day_offset == 0 and tte.start_time > now.time():
+                continue
+
+            # Check if attendance session was already submitted
+            if (co.id, target_date) in existing_sessions:
+                continue
+
+            days_remaining = 15 - day_offset
+            pending.append(PendingClassResponse(
+                course_offering_id=co.id,
+                subject_name=sub.name,
+                subject_code=sub.course_code,
+                section_name=sec.name,
+                date=target_date.isoformat(),
+                formatted_date=target_date.strftime("%a, %d %b"),
+                day_name=target_date.strftime("%A"),
+                start_time=tte.start_time.strftime("%H:%M:%S"),
+                end_time=tte.end_time.strftime("%H:%M:%S"),
+                room=tte.room or "TBA",
+                days_remaining=days_remaining,
+                is_expiring_soon=(days_remaining <= 3),
+            ))
+
+    # Sort: newest date to oldest date, then by class start_time
+    pending.sort(key=lambda x: (x.date, x.start_time), reverse=True)
+    return pending
+
+
 @router.get("/roster/{course_offering_id}", response_model=List[StudentRosterResponse])
 async def get_class_roster(
     course_offering_id: int,
@@ -129,6 +223,14 @@ async def sync_offline_attendance(
     db: AsyncSession = Depends(get_session)
 ):
     """Idempotent endpoint for synchronizing offline attendance captures."""
+    
+    # 0. 15-Day Attendance Marking Window Enforcement
+    days_since_class = (datetime.now().date() - payload.date).days
+    if days_since_class > 15:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Attendance window expired: cannot submit attendance for a class conducted {days_since_class} days ago (limit is 15 days)."
+        )
     
     # 1. Idempotency Check (Session Level)
     existing_session_stmt = select(AttendanceSession).where(AttendanceSession.session_uuid == payload.session_uuid)

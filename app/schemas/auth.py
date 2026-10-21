@@ -49,3 +49,20 @@ class TokenResponse(BaseModel):
 class SwitchRoleRequest(BaseModel):
     role: str
     scope_id: Optional[int] = None
+
+
+class UserProfileResponse(BaseModel):
+    user_id: int
+    full_name: str
+    email: str
+    roles: List[str]
+    primary_role: str
+    department: str = "Computer Science & Engineering"
+    school: str = "School of Information & Communication Technology"
+    total_courses: Optional[int] = None
+    weekly_hours: Optional[float] = None
+    roll_number: Optional[str] = None
+    employee_code: Optional[str] = None
+    program_name: Optional[str] = None
+    batch_name: Optional[str] = None
+    overall_attendance_pct: Optional[float] = None

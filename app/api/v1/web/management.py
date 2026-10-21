@@ -73,6 +73,8 @@ from app.schemas.user import (
     RoleAssignmentItem,
     RoleAssignmentResponse,
     UpdateUserRolesRequest,
+    AdminUpdateUserPasswordRequest,
+    AdminUpdateUserProfileRequest,
 )
 
 router = APIRouter()
@@ -343,6 +345,130 @@ async def activate_user(
     db.add(user)
     await db.commit()
     return {"status": "success", "message": f"User {user.email} has been reactivated."}
+
+@router.patch("/users/{user_id}/password", status_code=status.HTTP_200_OK, tags=["Admin - User Provisioning"])
+async def admin_update_user_password(
+    user_id: int,
+    payload: AdminUpdateUserPasswordRequest,
+    admin_id: int = Depends(require_admin),
+    db: AsyncSession = Depends(get_session)
+):
+    """Allows Admin to update or reset any teacher, student, or coordinator password."""
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    pwd_clean = payload.new_password.strip()
+    if len(pwd_clean) < 6:
+        raise HTTPException(status_code=400, detail="Password must be at least 6 characters long.")
+
+    user.hashed_password = get_password_hash(pwd_clean)
+    if payload.must_change_password is not None:
+        user.must_change_password = payload.must_change_password
+    db.add(user)
+    await db.commit()
+    return {
+        "status": "success",
+        "message": f"Password for {user.full_name} ({user.email}) updated successfully."
+    }
+
+@router.patch("/users/{user_id}/profile", response_model=UserResponse, tags=["Admin - User Provisioning"])
+async def admin_update_user_profile(
+    user_id: int,
+    payload: AdminUpdateUserProfileRequest,
+    admin_id: int = Depends(require_admin),
+    db: AsyncSession = Depends(get_session)
+):
+    """Update profile details for any user (name, email, roll number, and optional password)."""
+    user_stmt = (
+        select(User)
+        .options(selectinload(User.role_assignments), selectinload(User.student_profile))
+        .where(User.id == user_id)
+    )
+    user = (await db.exec(user_stmt)).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    # 1. Update Full Name
+    if payload.full_name is not None and payload.full_name.strip():
+        user.full_name = payload.full_name.strip()
+
+    # 2. Update Email (Validate uniqueness)
+    if payload.email is not None and payload.email.strip():
+        new_email = payload.email.strip().lower()
+        if new_email != user.email.lower():
+            existing = (await db.exec(
+                select(User).where(func.lower(User.email) == new_email, User.id != user_id)
+            )).first()
+            if existing:
+                raise HTTPException(status_code=400, detail=f"Email '{new_email}' is already registered to another user.")
+            user.email = new_email
+
+    # 3. Update Student Roll Number (if student profile exists or is provided)
+    if payload.roll_number is not None:
+        new_roll = payload.roll_number.strip().upper() if payload.roll_number.strip() else None
+        if new_roll:
+            existing_roll = (await db.exec(
+                select(StudentProfile).where(
+                    func.lower(StudentProfile.roll_number) == new_roll.lower(),
+                    StudentProfile.user_id != user_id
+                )
+            )).first()
+            if existing_roll:
+                raise HTTPException(status_code=400, detail=f"Roll number '{new_roll}' is already assigned to another student.")
+            
+            if user.student_profile:
+                user.student_profile.roll_number = new_roll
+                db.add(user.student_profile)
+            else:
+                sp = StudentProfile(user_id=user.id, roll_number=new_roll)
+                db.add(sp)
+
+    # 4. Update Password (if provided and non-empty)
+    if payload.new_password is not None and payload.new_password.strip():
+        pwd_clean = payload.new_password.strip()
+        if len(pwd_clean) < 6:
+            raise HTTPException(status_code=400, detail="Password must be at least 6 characters long.")
+        user.hashed_password = get_password_hash(pwd_clean)
+
+    # 5. Update Must Change Password flag
+    if payload.must_change_password is not None:
+        user.must_change_password = payload.must_change_password
+
+    db.add(user)
+    await db.commit()
+
+    # Re-fetch user with loaded relationships
+    reloaded_user = (await db.exec(
+        select(User)
+        .options(selectinload(User.role_assignments), selectinload(User.student_profile))
+        .where(User.id == user_id)
+    )).first()
+
+    assignments = reloaded_user.role_assignments or []
+    primary = assignments[0] if assignments else None
+
+    return UserResponse(
+        id=reloaded_user.id,
+        email=reloaded_user.email,
+        full_name=reloaded_user.full_name,
+        is_active=reloaded_user.is_active,
+        role=primary.role if primary else RoleEnum.STUDENT,
+        scope_type=primary.scope_type if primary else ScopeTypeEnum.UNIVERSITY,
+        scope_id=primary.scope_id if primary else None,
+        roles=[a.role for a in assignments],
+        role_assignments=[
+            RoleAssignmentResponse(
+                id=a.id,
+                role=a.role,
+                scope_type=a.scope_type,
+                scope_id=a.scope_id
+            )
+            for a in assignments
+        ],
+        roll_number=reloaded_user.student_profile.roll_number if reloaded_user.student_profile else None,
+        batch_id=reloaded_user.student_profile.batch_id if reloaded_user.student_profile else None,
+    )
 
 @router.put("/users/{user_id}/roles", response_model=UserResponse, tags=["Admin - User Provisioning"])
 async def update_user_roles(
