@@ -56,18 +56,23 @@ class Batch(SQLModel, table=True):
 
 # --- 2. Timeline & Mapping ---
 
-class AcademicTerm(SQLModel, table=True):
+class Semester(SQLModel, table=True):
+    __tablename__ = "semester"
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str 
     start_date: date
     end_date: date
     is_active: bool = Field(default=False) 
+    batch_id: Optional[int] = Field(default=None, foreign_key="batch.id")
+
+# Alias for backward-compatibility across all modules
+AcademicTerm = Semester
 
 class Section(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str 
     batch_id: int = Field(foreign_key="batch.id")
-    term_id: int = Field(foreign_key="academicterm.id")
+    term_id: int = Field(foreign_key="semester.id")
     samay_section_id: Optional[str] = Field(default=None, index=True)
     
     batch: Batch = Relationship(back_populates="sections")
@@ -82,7 +87,7 @@ class Subject(SQLModel, table=True):
 
 class CourseOffering(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-    term_id: int = Field(foreign_key="academicterm.id")
+    term_id: int = Field(foreign_key="semester.id")
     section_id: int = Field(foreign_key="section.id")
     subject_id: int = Field(foreign_key="subject.id")
     teacher_id: Optional[int] = Field(default=None, foreign_key="user.id")

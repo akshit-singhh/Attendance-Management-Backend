@@ -46,6 +46,7 @@ from app.schemas.academic import (
     DepartmentResponse,
     ProgrammeCreate,
     ProgrammeResponse,
+    ProgrammeUpdate,
     SpecializationCreate,
     SpecializationResponse,
     BatchCreate,
@@ -53,6 +54,7 @@ from app.schemas.academic import (
     SectionResponse,
     SubjectCreate,
     TermCreate,
+    TermUpdate,
     CourseOfferingCreate,
     FacultyResponse,
     BulkEnrollmentCreate,
@@ -699,7 +701,8 @@ async def create_programme(
         id=prog.id, 
         name=prog.name, 
         code=prog.code, 
-        department_code=dept.code
+        department_code=dept.code,
+        total_semesters=prog.total_semesters
     )
 
 @router.get("/programmes", response_model=List[ProgrammeResponse], tags=["Academic Flow - Hierarchy"])
@@ -719,10 +722,56 @@ async def get_programmes(
             id=prog.id,
             name=prog.name,
             code=prog.code,
-            department_code=dept.code
+            department_code=dept.code,
+            total_semesters=prog.total_semesters
         )
         for prog, dept in result.all()
     ]
+
+@router.put("/programmes/{programme_id}", response_model=ProgrammeResponse, tags=["Academic Flow - Hierarchy"])
+async def update_programme(
+    programme_id: int,
+    payload: ProgrammeUpdate,
+    admin_id: int = Depends(require_hod),
+    db: AsyncSession = Depends(get_session)
+):
+    prog = await db.get(Programme, programme_id)
+    if not prog:
+        raise HTTPException(status_code=404, detail="Programme not found.")
+
+    if payload.department_code:
+        dept = (await db.exec(select(Department).where(Department.code == payload.department_code.upper().strip()))).first()
+        if not dept:
+            raise HTTPException(status_code=404, detail=f"Department code '{payload.department_code}' not found.")
+        prog.department_id = dept.id
+
+    if payload.code:
+        new_code = payload.code.upper().strip()
+        if new_code != prog.code:
+            existing = (await db.exec(select(Programme).where(Programme.code == new_code))).first()
+            if existing:
+                raise HTTPException(status_code=400, detail=f"Programme code '{new_code}' already exists.")
+            prog.code = new_code
+
+    if payload.name:
+        prog.name = payload.name.strip()
+
+    if payload.total_semesters is not None:
+        prog.total_semesters = payload.total_semesters
+
+    db.add(prog)
+    await db.commit()
+    await db.refresh(prog)
+
+    dept = await db.get(Department, prog.department_id)
+
+    return ProgrammeResponse(
+        id=prog.id,
+        name=prog.name,
+        code=prog.code,
+        department_code=dept.code if dept else "",
+        total_semesters=prog.total_semesters
+    )
 
 # --- Specializations ---
 
@@ -937,8 +986,9 @@ async def get_all_sections(
 # 3. TERMS & SUBJECTS
 # ============================================================================
 
+@router.post("/semesters", status_code=status.HTTP_201_CREATED, response_model=AcademicTerm, tags=["HOD - Academic Setup"])
 @router.post("/terms", status_code=status.HTTP_201_CREATED, response_model=AcademicTerm, tags=["HOD - Academic Setup"])
-async def create_term(
+async def create_semester(
     payload: TermCreate,
     admin_id: int = Depends(require_hod),
     db: AsyncSession = Depends(get_session)
@@ -954,20 +1004,92 @@ async def create_term(
         name=payload.name.strip(),
         start_date=payload.start_date,
         end_date=payload.end_date,
-        is_active=payload.is_active
+        is_active=payload.is_active,
+        batch_id=payload.batch_id,
     )
     db.add(new_term)
     await db.commit()
     await db.refresh(new_term)
     return new_term
 
+# Backward-compatible function alias
+create_term = create_semester
+
+@router.get("/semesters", response_model=List[AcademicTerm], tags=["HOD - Academic Setup"])
 @router.get("/terms", response_model=List[AcademicTerm], tags=["HOD - Academic Setup"])
-async def get_all_terms(
+async def get_all_semesters(
     admin_id: int = Depends(require_hod),
     db: AsyncSession = Depends(get_session)
 ):
     result = await db.exec(select(AcademicTerm).order_by(AcademicTerm.start_date.desc()))
     return result.all()
+
+# Backward-compatible function alias
+get_all_terms = get_all_semesters
+
+@router.put("/semesters/{term_id}", response_model=AcademicTerm, tags=["HOD - Academic Setup"])
+@router.put("/terms/{term_id}", response_model=AcademicTerm, tags=["HOD - Academic Setup"])
+async def update_semester(
+    term_id: int,
+    payload: TermUpdate,
+    admin_id: int = Depends(require_hod),
+    db: AsyncSession = Depends(get_session)
+):
+    term = await db.get(AcademicTerm, term_id)
+    if not term:
+        raise HTTPException(status_code=404, detail="Academic Term not found.")
+
+    if payload.is_active is True:
+        statement = select(AcademicTerm).where(AcademicTerm.is_active == True, AcademicTerm.id != term_id)
+        active_terms = (await db.exec(statement)).all()
+        for t in active_terms:
+            t.is_active = False
+            db.add(t)
+
+    if payload.name is not None:
+        term.name = payload.name.strip()
+    if payload.start_date is not None:
+        term.start_date = payload.start_date
+    if payload.end_date is not None:
+        term.end_date = payload.end_date
+    if payload.is_active is not None:
+        term.is_active = payload.is_active
+    if payload.batch_id is not None:
+        term.batch_id = payload.batch_id
+
+    db.add(term)
+    await db.commit()
+    await db.refresh(term)
+    return term
+
+# Backward-compatible function alias
+update_term = update_semester
+
+@router.put("/semesters/{term_id}/activate", response_model=AcademicTerm, tags=["HOD - Academic Setup"])
+@router.put("/terms/{term_id}/activate", response_model=AcademicTerm, tags=["HOD - Academic Setup"])
+async def activate_semester(
+    term_id: int,
+    admin_id: int = Depends(require_hod),
+    db: AsyncSession = Depends(get_session)
+):
+    term = await db.get(AcademicTerm, term_id)
+    if not term:
+        raise HTTPException(status_code=404, detail="Academic Term not found.")
+
+    statement = select(AcademicTerm).where(AcademicTerm.is_active == True)
+    active_terms = (await db.exec(statement)).all()
+    for t in active_terms:
+        t.is_active = False
+        db.add(t)
+
+    term.is_active = True
+    db.add(term)
+    await db.commit()
+    await db.refresh(term)
+    return term
+
+# Backward-compatible function alias
+activate_term = activate_semester
 
 @router.post("/subjects", status_code=status.HTTP_201_CREATED, response_model=Subject, tags=["HOD - Academic Setup"])
 async def create_subject(
@@ -1089,7 +1211,10 @@ async def get_all_course_offerings(
             Subject.course_code.label("subject_code"),
             CourseOffering.term_id.label("term_id"),
             CourseOffering.section_id.label("section_id"),
-            CourseOffering.subject_id.label("subject_id")
+            CourseOffering.subject_id.label("subject_id"),
+            CourseOffering.course_type.label("offering_course_type"),
+            Subject.course_type.label("subject_course_type"),
+            Subject.credits.label("subject_credits")
         )
         .join(AcademicTerm, CourseOffering.term_id == AcademicTerm.id)
         .join(Section, CourseOffering.section_id == Section.id)
@@ -1110,7 +1235,9 @@ async def get_all_course_offerings(
             subject_code=row.subject_code,
             term_id=row.term_id,
             section_id=row.section_id,
-            subject_id=row.subject_id
+            subject_id=row.subject_id,
+            course_type=row.offering_course_type or row.subject_course_type or "LECTURE",
+            credits=row.subject_credits or 3
         )
         for row in result
     ]
@@ -1638,8 +1765,9 @@ async def delete_section(
     return {"status": "success", "message": f"Section '{section.name}' deleted successfully."}
 
 
+@router.delete("/semesters/{term_id}", status_code=status.HTTP_200_OK, tags=["HOD - Academic Setup"])
 @router.delete("/terms/{term_id}", status_code=status.HTTP_200_OK, tags=["HOD - Academic Setup"])
-async def delete_term(
+async def delete_semester(
     term_id: int,
     admin_id: int = Depends(require_hod),
     db: AsyncSession = Depends(get_session)
@@ -1647,6 +1775,12 @@ async def delete_term(
     term = await db.get(AcademicTerm, term_id)
     if not term:
         raise HTTPException(status_code=404, detail="Academic Term not found.")
+
+    if term.is_active:
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot delete the active semester. Please activate another semester before deleting this one."
+        )
 
     linked_sections = (await db.exec(select(Section).where(Section.term_id == term_id))).first()
     if linked_sections:
