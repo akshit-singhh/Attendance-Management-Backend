@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlmodel import select, func
 from sqlalchemy import case
-from typing import List, Optional
+from typing import List, Optional, Dict
 from pydantic import BaseModel
 
 from app.core.database import get_session
@@ -107,20 +107,21 @@ async def get_student_dashboard(
         total_held += periods_held
         total_attended += periods_attended
         
-        percentage = (periods_attended / periods_held * 100) if periods_held > 0 else 100.0
-        
-        if percentage >= 85:
-            standing = "Excellent"
-        elif percentage >= WARNING_THRESHOLD:
-            standing = "Good Standing"
+        if periods_held > 0:
+            percentage = (periods_attended / periods_held * 100)
+            if percentage >= 85:
+                standing = "Excellent"
+            elif percentage >= WARNING_THRESHOLD:
+                standing = "Good Standing"
+            else:
+                standing = "Low Attendance"
+                critical_subjects += 1
+            if percentage >= highest_score:
+                highest_score = percentage
+                highest_subject = f"{row.subject_name} ({percentage:.1f}%)"
         else:
-            standing = "Low Attendance"
-            critical_subjects += 1
-            
-        if percentage >= highest_score and periods_held > 0:
-            highest_score = percentage
-            highest_subject = f"{row.subject_name} ({percentage:.1f}%)"
-
+            percentage = 0.0
+            standing = "Not Started"
         subjects_history.append(
             SubjectAttendanceHistory(
                 subject_name=row.subject_name,
@@ -133,7 +134,7 @@ async def get_student_dashboard(
             )
         )
 
-    overall_percentage = (total_attended / total_held * 100) if total_held > 0 else 100.0
+    overall_percentage = (total_attended / total_held * 100) if total_held > 0 else 0.0
     risk_level = f"{critical_subjects} Critical" if critical_subjects > 0 else "Safe"
 
     # Compute batch progression semester (e.g. "Semester 5 (2026-27 Odd)")
@@ -155,4 +156,170 @@ async def get_student_dashboard(
         highest_score_subject=highest_subject,
         risk_level=risk_level,
         subjects=subjects_history
+    )
+
+import calendar as py_calendar
+from datetime import date as dt_date, datetime as dt_datetime
+from app.models.academic import TimetableEntry, DayOfWeek
+
+class CalendarClassItem(BaseModel):
+    course_offering_id: int
+    subject_code: str
+    subject_name: str
+    teacher_name: str
+    room: str
+    start_time: str
+    end_time: str
+    status: str  # "PRESENT", "ABSENT", "SCHEDULED", "NOT_MARKED"
+
+class CalendarDayData(BaseModel):
+    date: str
+    day_name: str
+    day_number: int
+    has_classes: bool
+    dot_status: Optional[str] = None  # "PRESENT", "ABSENT", "MIXED", or None
+    classes: List[CalendarClassItem] = []
+
+class StudentCalendarResponse(BaseModel):
+    month: str
+    month_label: str
+    total_attended: int = 0
+    total_missed: int = 0
+    days: Dict[str, CalendarDayData] = {}
+
+
+@router.get("/calendar", response_model=StudentCalendarResponse, tags=["Mobile Student API"])
+async def get_student_calendar(
+    month: Optional[str] = Query(default=None),
+    student_id: int = Depends(require_student),
+    db: AsyncSession = Depends(get_session)
+):
+    """
+    Returns daily class schedule and attendance breakdown for the student for a given month.
+    Accurately maps classes to the official timetable and marks attended/missed/scheduled.
+    """
+    today = dt_date.today()
+    target_year = today.year
+    target_month = today.month
+
+    if month:
+        try:
+            parts = month.strip().split("-")
+            target_year = int(parts[0])
+            target_month = int(parts[1])
+        except Exception:
+            pass
+
+    max_days = py_calendar.monthrange(target_year, target_month)[1]
+    start_of_month = dt_date(target_year, target_month, 1)
+    end_of_month = dt_date(target_year, target_month, max_days)
+    month_label = start_of_month.strftime("%B %Y")
+    month_key = f"{target_year:04d}-{target_month:02d}"
+
+    day_map = {
+        0: DayOfWeek.MON,
+        1: DayOfWeek.TUE,
+        2: DayOfWeek.WED,
+        3: DayOfWeek.THU,
+        4: DayOfWeek.FRI,
+        5: DayOfWeek.SAT,
+        6: DayOfWeek.SUN,
+    }
+    dow_names = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
+
+    # Fetch student timetable slots
+    tt_stmt = (
+        select(TimetableEntry, CourseOffering, Subject, User.full_name.label("teacher_name"))
+        .join(CourseOffering, TimetableEntry.course_offering_id == CourseOffering.id)
+        .join(Subject, CourseOffering.subject_id == Subject.id)
+        .outerjoin(User, CourseOffering.teacher_id == User.id)
+        .join(StudentSubjectMap, StudentSubjectMap.course_offering_id == CourseOffering.id)
+        .where(StudentSubjectMap.student_id == student_id)
+        .order_by(TimetableEntry.start_time)
+    )
+    tt_results = (await db.exec(tt_stmt)).all()
+    day_slots_map: Dict[DayOfWeek, list] = {}
+    for row in tt_results:
+        dow = row[0].day_of_week
+        day_slots_map.setdefault(dow, []).append(row)
+
+    # Fetch attendance records for this month
+    rec_stmt = (
+        select(AttendanceRecord)
+        .where(
+            AttendanceRecord.student_id == student_id,
+            AttendanceRecord.date >= start_of_month,
+            AttendanceRecord.date <= end_of_month
+        )
+    )
+    records = (await db.exec(rec_stmt)).all()
+    rec_map = {(r.date, r.course_offering_id): r.status for r in records}
+
+    days_dict: Dict[str, CalendarDayData] = {}
+    month_attended = 0
+    month_missed = 0
+
+    for day_num in range(1, max_days + 1):
+        cur_date = dt_date(target_year, target_month, day_num)
+        dow = day_map.get(cur_date.weekday())
+        day_tt = day_slots_map.get(dow, [])
+        day_classes: List[CalendarClassItem] = []
+        has_present = False
+        has_absent = False
+
+        for tt, off, subj, teacher_name in day_tt:
+            rec_status = rec_map.get((cur_date, off.id))
+            if rec_status is not None:
+                st_val = rec_status.value if hasattr(rec_status, "value") else str(rec_status)
+                if st_val == "PRESENT":
+                    has_present = True
+                    month_attended += 1
+                elif st_val == "ABSENT":
+                    has_absent = True
+                    month_missed += 1
+                status_str = st_val
+            else:
+                if cur_date > today:
+                    status_str = "SCHEDULED"
+                else:
+                    status_str = "NOT_MARKED"
+
+            day_classes.append(
+                CalendarClassItem(
+                    course_offering_id=off.id,
+                    subject_code=subj.course_code,
+                    subject_name=subj.name,
+                    teacher_name=teacher_name or "Faculty",
+                    room=tt.room or "TBA",
+                    start_time=str(tt.start_time),
+                    end_time=str(tt.end_time),
+                    status=status_str,
+                )
+            )
+
+        dot_status: Optional[str] = None
+        if day_classes:
+            if has_absent and has_present:
+                dot_status = "MIXED"
+            elif has_absent:
+                dot_status = "ABSENT"
+            elif has_present:
+                dot_status = "PRESENT"
+
+        date_key = cur_date.isoformat()
+        days_dict[date_key] = CalendarDayData(
+            date=date_key,
+            day_name=dow_names.get(cur_date.weekday(), "Mon"),
+            day_number=day_num,
+            has_classes=len(day_classes) > 0,
+            dot_status=dot_status,
+            classes=day_classes,
+        )
+
+    return StudentCalendarResponse(
+        month=month_key,
+        month_label=month_label,
+        total_attended=month_attended,
+        total_missed=month_missed,
+        days=days_dict,
     )
