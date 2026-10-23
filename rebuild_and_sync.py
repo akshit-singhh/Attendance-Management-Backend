@@ -178,8 +178,7 @@ async def rebuild_all():
             if not teacher_name or not subject_code or not section_name:
                 continue
 
-            if is_lab and batch_id_val != '0':
-                section_name = f"{section_name} (Batch {batch_id_val})"
+            batch_label = f"G-{batch_id_val}" if is_lab and batch_id_val != '0' else None
 
             # Teacher
             u = user_by_name.get(teacher_name.lower())
@@ -243,17 +242,18 @@ async def rebuild_all():
             start_time, end_time = PERIOD_MAP[tt_period]
             day_enum = DAY_MAP[tt_day]
 
-            if (offering.id, day_enum, start_time) not in entry_set:
+            if (offering.id, day_enum, start_time, batch_label) not in entry_set:
                 new_tt = TimetableEntry(
                     course_offering_id=offering.id,
                     day_of_week=day_enum,
                     start_time=start_time,
                     end_time=end_time,
                     room=room_name,
+                    batch_label=batch_label,
                     source='scrape'
                 )
                 db.add(new_tt)
-                entry_set.add((offering.id, day_enum, start_time))
+                entry_set.add((offering.id, day_enum, start_time, batch_label))
                 added_tt += 1
 
                 if added_tt % 300 == 0:

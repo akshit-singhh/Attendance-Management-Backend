@@ -249,12 +249,13 @@ async def create_user(
 @router.get("/users", response_model=PaginatedUserResponse, tags=["Admin - User Provisioning"])
 async def list_users(
     role: Optional[RoleEnum] = Query(default=None),
+    search: Optional[str] = Query(default=None),
     page: int = Query(default=1, ge=1),
     size: int = Query(default=50, ge=1, le=100),
     user_id: int = Depends(require_hod),  # <-- Changed dependency here
     db: AsyncSession = Depends(get_session)
 ):
-    """List users with pagination, optional role filtering, and eagerly loaded student profiles."""
+    """List users with pagination, optional role and search filtering, and eagerly loaded student profiles."""
     
     # 1. Base queries
     count_stmt = select(func.count(User.id))
@@ -263,15 +264,27 @@ async def list_users(
         selectinload(User.student_profile)
     )
 
-    # 2. Apply role filter in SQL (crucial for accurate pagination)
+    # 2. Apply role filter in SQL
     if role:
-        count_stmt = count_stmt.join(RoleAssignment).where(RoleAssignment.role == role)
-        stmt = stmt.join(RoleAssignment).where(RoleAssignment.role == role)
+        sub_role = select(RoleAssignment.user_id).where(RoleAssignment.role == role)
+        count_stmt = count_stmt.where(User.id.in_(sub_role))
+        stmt = stmt.where(User.id.in_(sub_role))
 
-    # 3. Execute total count
+    # 3. Apply search filter in SQL across name, email, roll number
+    if search and search.strip():
+        term = f"%{search.strip()}%"
+        search_filter = or_(
+            User.full_name.ilike(term),
+            User.email.ilike(term),
+            User.id.in_(select(StudentProfile.user_id).where(StudentProfile.roll_number.ilike(term)))
+        )
+        count_stmt = count_stmt.where(search_filter)
+        stmt = stmt.where(search_filter)
+
+    # 4. Execute total count
     total_users = (await db.exec(count_stmt)).one()
 
-    # 4. Apply pagination offsets and fetch the specific page
+    # 5. Apply pagination offsets and fetch the specific page
     skip = (page - 1) * size
     stmt = stmt.order_by(User.full_name).offset(skip).limit(size)
     result = await db.exec(stmt)

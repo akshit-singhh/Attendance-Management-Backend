@@ -171,6 +171,7 @@ class CalendarClassItem(BaseModel):
     start_time: str
     end_time: str
     status: str  # "PRESENT", "ABSENT", "SCHEDULED", "NOT_MARKED"
+    batch_label: Optional[str] = None
 
 class CalendarDayData(BaseModel):
     date: str
@@ -294,6 +295,7 @@ async def get_student_calendar(
                     start_time=str(tt.start_time),
                     end_time=str(tt.end_time),
                     status=status_str,
+                    batch_label=tt.batch_label,
                 )
             )
 

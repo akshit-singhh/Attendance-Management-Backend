@@ -249,7 +249,11 @@ async def get_teacher_timetable(
 
                 section_name=(item.get("SectionName") or "").strip(),
 
-                room=(item.get("RoomName") or "").strip(),
+                room=(
+                    f"{(item.get('RoomName') or '').strip()} G-{str(item.get('Batch_Id')).strip()}"
+                    if str(item.get("Batch_Id", "0")).strip() not in ("0", "", "None") and f"G-{str(item.get('Batch_Id')).strip()}" not in (item.get("RoomName") or "")
+                    else (item.get("RoomName") or "").strip()
+                ),
 
                 building=(item.get("Building") or "").strip(),
 
@@ -359,7 +363,7 @@ async def get_my_timetable(
 
     role = payload.get("role")
 
-    target_id = semester_id or term_id
+    target_id = semester_id if isinstance(semester_id, int) else (term_id if isinstance(term_id, int) else None)
 
     if not target_id:
 
@@ -487,7 +491,11 @@ async def get_student_timetable(
                     teacher_name=(item.get("TeacherName") or "").strip(),
                     teacher_abbr=(item.get("abbr") or "").strip(),
                     section_name=(item.get("SectionName") or "").strip(),
-                    room=(item.get("RoomName") or "").strip(),
+                    room=(
+                    f"{(item.get('RoomName') or '').strip()} G-{str(item.get('Batch_Id')).strip()}"
+                    if str(item.get("Batch_Id", "0")).strip() not in ("0", "", "None") and f"G-{str(item.get('Batch_Id')).strip()}" not in (item.get("RoomName") or "")
+                    else (item.get("RoomName") or "").strip()
+                ),
                     building=(item.get("Building") or "").strip(),
                     activity=(item.get("ActivityTag") or "Lecture").strip(),
                 )
@@ -526,7 +534,11 @@ async def get_student_timetable(
                     teacher_name=t_name or "Faculty",
                     teacher_abbr="",
                     section_name=sec.name,
-                    room=entry.room or "TBA",
+                    room=(
+                    f"{entry.room.strip()} {entry.batch_label}"
+                    if entry.room and entry.batch_label and entry.batch_label not in entry.room
+                    else (entry.room or "TBA")
+                ),
                     building="Campus",
                     activity="Lecture",
                 )

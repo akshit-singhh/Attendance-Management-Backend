@@ -101,8 +101,7 @@ async def sync_timetable(json_file_path: str):
             subject_id = subject.id
 
             # --- 4. UPSERT SECTION ---
-            if is_lab and entry.get("Batch_Id", "0") != "0":
-                section_name = f"{section_name} (Batch {entry['Batch_Id']})"
+            batch_label = f"G-{entry['Batch_Id']}" if is_lab and entry.get("Batch_Id", "0") != "0" else None
 
             section = (await db.exec(
                 select(Section).where(Section.name == section_name, Section.term_id == active_term_id)
@@ -144,7 +143,8 @@ async def sync_timetable(json_file_path: str):
                 select(TimetableEntry).where(
                     TimetableEntry.course_offering_id == offering_id,
                     TimetableEntry.day_of_week == day_enum,
-                    TimetableEntry.start_time == start_time
+                    TimetableEntry.start_time == start_time,
+                    TimetableEntry.batch_label == batch_label
                 )
             )).first()
             
@@ -154,7 +154,8 @@ async def sync_timetable(json_file_path: str):
                     day_of_week=day_enum,
                     start_time=start_time,
                     end_time=end_time,
-                    room=room_name
+                    room=room_name,
+                    batch_label=batch_label
                 )
                 db.add(new_tt)
                 await db.commit()
