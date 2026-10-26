@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     SAMAY_API_URL: str
     MYGBU_SCHEDULE_URL: str
 
+    # Push Notification Settings
+    NOTIFICATION_PROVIDER: str = "ntfy"
+    NTFY_SERVER_URL: str = "http://192.168.1.7:8095"
+
     class Config:
         env_file = ".env"
 

@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from app.services.notification_service import notification_service
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlmodel import select
 from typing import List, Optional
@@ -219,6 +220,7 @@ async def get_class_roster(
 @router.post("/sync", status_code=status.HTTP_200_OK)
 async def sync_offline_attendance(
     payload: OfflineSyncPayload,
+    background_tasks: BackgroundTasks,
     teacher_id: int = Depends(require_teacher),
     db: AsyncSession = Depends(get_session)
 ):
@@ -349,6 +351,44 @@ async def sync_offline_attendance(
 
     db.add_all(db_records)
     await db.commit()
+
+    # Dispatch student push notifications in background
+    try:
+        subject = await db.get(Subject, offering.subject_id)
+        subject_name = subject.name if subject else "Class"
+        subject_code = subject.course_code if subject else ""
+        date_str = payload.date.strftime("%d %b %Y")
+
+        student_ids = [item.student_id for item in payload.records]
+        if student_ids:
+            student_query = (
+                select(StudentProfile.user_id, StudentProfile.roll_number, User.full_name)
+                .join(User, StudentProfile.user_id == User.id)
+                .where(StudentProfile.user_id.in_(student_ids))
+            )
+            student_rows = (await db.exec(student_query)).all()
+            student_info_map = {row[0]: {"roll": row[1], "name": row[2]} for row in student_rows}
+
+            alerts = []
+            for item in payload.records:
+                info = student_info_map.get(item.student_id)
+                if info and info.get("roll"):
+                    alerts.append({
+                        "roll_number": info["roll"],
+                        "student_name": info["name"],
+                        "subject_name": subject_name,
+                        "subject_code": subject_code,
+                        "status": item.status,
+                        "date_str": date_str,
+                    })
+
+            if alerts:
+                background_tasks.add_task(
+                    notification_service.batch_send_attendance_alerts,
+                    alerts
+                )
+    except Exception as exc:
+        pass
 
     return {
         "status": "success",
