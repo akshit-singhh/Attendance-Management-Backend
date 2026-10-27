@@ -73,6 +73,7 @@ from app.schemas.audit import (
 from app.schemas.corrections import (
     CorrectionRequestCreate,
     CorrectionDecisionPayload,
+    BulkCorrectionDecisionPayload,
     CorrectionQueueResponse,
 )
 
@@ -137,6 +138,7 @@ __all__ = [
     # Corrections
     "CorrectionRequestCreate",
     "CorrectionDecisionPayload",
+    "BulkCorrectionDecisionPayload",
     "CorrectionQueueResponse",
     # Dashboard
     "DashboardStatsResponse",
