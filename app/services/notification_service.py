@@ -132,4 +132,61 @@ class NotificationService:
             succeeded = sum(1 for r in results if r is True)
             logger.info(f"Dispatched {len(tasks)} attendance notifications. Succeeded: {succeeded}/{len(tasks)}")
 
+    async def send_class_postponed_alert(
+        self,
+        roll_number: str,
+        student_name: str,
+        subject_name: str,
+        subject_code: str,
+        date_str: str,
+        reason: str
+    ) -> bool:
+        if not roll_number:
+            return False
+
+        topic = normalize_student_topic(roll_number)
+        title = f"Class Postponed: {subject_code}"
+        message = f"Your {subject_name} class on {date_str} has been postponed. Reason: {reason}."
+        priority = "default"
+        tags = ["calendar", "information_source"]
+
+        extra_data = {
+            "type": "class_postponed",
+            "roll_number": roll_number,
+            "subject_code": subject_code,
+            "date": date_str,
+            "reason": reason
+        }
+
+        return await self.provider.send(
+            topic_or_token=topic,
+            title=title,
+            message=message,
+            priority=priority,
+            tags=tags,
+            extra_data=extra_data
+        )
+
+    async def batch_send_class_postponed_alerts(self, alerts: List[Dict[str, Any]]):
+        """Send class postponed notifications in paced batches."""
+        semaphore = asyncio.Semaphore(3)
+
+        async def paced_dispatch(alert_dict: Dict[str, Any]) -> bool:
+            async with semaphore:
+                await asyncio.sleep(0.04)
+                return await self.send_class_postponed_alert(
+                    roll_number=alert_dict.get("roll_number", ""),
+                    student_name=alert_dict.get("student_name", ""),
+                    subject_name=alert_dict.get("subject_name", ""),
+                    subject_code=alert_dict.get("subject_code", ""),
+                    date_str=alert_dict.get("date_str", ""),
+                    reason=alert_dict.get("reason", "Faculty on Leave")
+                )
+
+        tasks = [paced_dispatch(a) for a in alerts if a.get("roll_number")]
+        if tasks:
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            succeeded = sum(1 for r in results if r is True)
+            logger.info(f"Dispatched {len(tasks)} postponement notifications. Succeeded: {succeeded}/{len(tasks)}")
+
 notification_service = NotificationService()

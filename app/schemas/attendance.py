@@ -67,6 +67,12 @@ class PendingClassResponse(BaseModel):
     is_expiring_soon: bool
 
 
+class PostponeClassRequest(BaseModel):
+    course_offering_id: int
+    date: date
+    reason: str
+
+
 # --- Admin / Coordinator Live Attendance Session Views ---
 
 class AttendanceSessionItemResponse(BaseModel):

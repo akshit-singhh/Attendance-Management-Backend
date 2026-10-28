@@ -256,6 +256,31 @@ async def get_student_calendar(
     records = (await db.exec(rec_stmt)).all()
     rec_map = {(r.date, r.course_offering_id): r.status for r in records}
 
+    # Fetch postponed sessions (is_held == False) for courses enrolled by this student
+    postponed_stmt = (
+        select(AttendanceSession)
+        .join(StudentSubjectMap, StudentSubjectMap.course_offering_id == AttendanceSession.course_offering_id)
+        .where(
+            StudentSubjectMap.student_id == student_id,
+            AttendanceSession.date >= start_of_month,
+            AttendanceSession.date <= end_of_month,
+            AttendanceSession.is_held == False
+        )
+    )
+    postponed_sessions = (await db.exec(postponed_stmt)).all()
+    postponed_map = {(s.date, s.course_offering_id): (s.reason_not_held or "Class Postponed") for s in postponed_sessions}
+
+    # Enrolled offerings map: course_offering_id -> (Subject, teacher_name)
+    offering_info_stmt = (
+        select(CourseOffering.id, Subject, User.full_name.label("teacher_name"))
+        .join(Subject, CourseOffering.subject_id == Subject.id)
+        .outerjoin(User, CourseOffering.teacher_id == User.id)
+        .join(StudentSubjectMap, StudentSubjectMap.course_offering_id == CourseOffering.id)
+        .where(StudentSubjectMap.student_id == student_id)
+    )
+    offering_info_rows = (await db.exec(offering_info_stmt)).all()
+    offering_info_map = {row[0]: (row[1], row[2] or "Faculty") for row in offering_info_rows}
+
     days_dict: Dict[str, CalendarDayData] = {}
     month_attended = 0
     month_missed = 0
@@ -267,8 +292,10 @@ async def get_student_calendar(
         day_classes: List[CalendarClassItem] = []
         has_present = False
         has_absent = False
+        scheduled_offering_ids = set()
 
         for tt, off, subj, teacher_name in day_tt:
+            scheduled_offering_ids.add(off.id)
             rec_status = rec_map.get((cur_date, off.id))
             if rec_status is not None:
                 st_val = rec_status.value if hasattr(rec_status, "value") else str(rec_status)
@@ -279,6 +306,8 @@ async def get_student_calendar(
                     has_absent = True
                     month_missed += 1
                 status_str = st_val
+            elif (cur_date, off.id) in postponed_map:
+                status_str = "POSTPONED"
             else:
                 if cur_date > today:
                     status_str = "SCHEDULED"
@@ -291,13 +320,64 @@ async def get_student_calendar(
                     subject_code=subj.course_code,
                     subject_name=subj.name,
                     teacher_name=teacher_name or "Faculty",
-                    room=tt.room or "TBA",
+                    room=postponed_map.get((cur_date, off.id), tt.room or "TBA") if status_str == "POSTPONED" else (tt.room or "TBA"),
                     start_time=str(tt.start_time),
                     end_time=str(tt.end_time),
                     status=status_str,
                     batch_label=tt.batch_label,
                 )
             )
+
+        # Append make-up / extra classes held on this date (conducted outside regular timetable slot)
+        day_records = [r for r in records if r.date == cur_date and r.course_offering_id not in scheduled_offering_ids]
+        for r in day_records:
+            off_info = offering_info_map.get(r.course_offering_id)
+            if off_info:
+                subj, t_name = off_info
+                st_val = r.status.value if hasattr(r.status, "value") else str(r.status)
+                if st_val == "PRESENT":
+                    has_present = True
+                    month_attended += 1
+                elif st_val == "ABSENT":
+                    has_absent = True
+                    month_missed += 1
+
+                day_classes.append(
+                    CalendarClassItem(
+                        course_offering_id=r.course_offering_id,
+                        subject_code=subj.course_code,
+                        subject_name=subj.name,
+                        teacher_name=t_name,
+                        room="Make-up Class",
+                        start_time="Extra Class",
+                        end_time="",
+                        status=st_val,
+                        batch_label="Make-up",
+                    )
+                )
+
+        # Append unscheduled postponed sessions if any
+        unscheduled_postponed = [
+            (off_id, reason) for (p_date, off_id), reason in postponed_map.items()
+            if p_date == cur_date and off_id not in scheduled_offering_ids
+        ]
+        for off_id, reason in unscheduled_postponed:
+            off_info = offering_info_map.get(off_id)
+            if off_info:
+                subj, t_name = off_info
+                day_classes.append(
+                    CalendarClassItem(
+                        course_offering_id=off_id,
+                        subject_code=subj.course_code,
+                        subject_name=subj.name,
+                        teacher_name=t_name,
+                        room=reason,
+                        start_time="Postponed",
+                        end_time="",
+                        status="POSTPONED",
+                        batch_label=None,
+                    )
+                )
 
         dot_status: Optional[str] = None
         if day_classes:
@@ -307,6 +387,8 @@ async def get_student_calendar(
                 dot_status = "ABSENT"
             elif has_present:
                 dot_status = "PRESENT"
+            elif any(c.status == "POSTPONED" for c in day_classes):
+                dot_status = "POSTPONED"
 
         date_key = cur_date.isoformat()
         days_dict[date_key] = CalendarDayData(

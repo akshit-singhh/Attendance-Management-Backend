@@ -4,6 +4,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlmodel import select
 from typing import List, Optional
 from datetime import date, datetime, timezone, timedelta
+import uuid
 from sqlalchemy.exc import IntegrityError
 
 from app.core.database import get_session
@@ -13,6 +14,7 @@ from app.models.academic import CourseOffering, Subject, Section, StudentSubject
 from app.models.attendance import (
     AttendanceSession,
     AttendanceRecord,
+    SessionMode,
     SessionStatus,
     CorrectionRequest, 
     CorrectionStatus, 
@@ -23,6 +25,7 @@ from app.schemas.attendance import (
     CourseScheduleResponse,
     SessionHistoryResponse,
     PendingClassResponse,
+    PostponeClassRequest,
 )
 from app.schemas.corrections import CorrectionRequestCreate
 
@@ -39,10 +42,12 @@ async def get_daily_schedule(
     
     # Get the current or requested day of the week to filter timetable entries
     target_day_str = (day or datetime.now().strftime("%a")).upper()
-    try:
-        current_day = DayOfWeek[target_day_str]
-    except KeyError:
-        current_day = DayOfWeek.MON
+    current_day = None
+    if target_day_str != "ALL":
+        try:
+            current_day = DayOfWeek[target_day_str]
+        except KeyError:
+            current_day = DayOfWeek.MON
 
     teacher = await db.get(User, teacher_id)
     matched_teacher_ids = [teacher_id]
@@ -56,9 +61,10 @@ async def get_daily_schedule(
         .join(Section, CourseOffering.section_id == Section.id)
         .join(TimetableEntry, CourseOffering.id == TimetableEntry.course_offering_id)
         .where(CourseOffering.teacher_id.in_(matched_teacher_ids))
-        .where(TimetableEntry.day_of_week == current_day)
-        .order_by(TimetableEntry.start_time)
     )
+    if current_day is not None:
+        statement = statement.where(TimetableEntry.day_of_week == current_day)
+    statement = statement.order_by(TimetableEntry.start_time)
     results = (await db.exec(statement)).all()
 
     schedule = []
@@ -274,7 +280,8 @@ async def sync_offline_attendance(
     # 3. Duplicate Session Check (Same target and date, but different UUID)
     duplicate_check_stmt = select(AttendanceSession).where(
         AttendanceSession.course_offering_id == payload.course_offering_id,
-        AttendanceSession.date == payload.date
+        AttendanceSession.date == payload.date,
+        AttendanceSession.is_held == True
     )
     duplicate_session = (await db.exec(duplicate_check_stmt)).first()
     
@@ -475,3 +482,117 @@ async def submit_correction(
     await db.commit()
     
     return {"status": "success", "message": "Correction request submitted for HOD approval."}
+
+
+@router.post("/postpone", status_code=status.HTTP_200_OK)
+async def postpone_class(
+    payload: PostponeClassRequest,
+    background_tasks: BackgroundTasks,
+    teacher_id: int = Depends(require_teacher),
+    db: AsyncSession = Depends(get_session)
+):
+    """Postpone or mark a class not held for a specific date, notifying enrolled students."""
+    # 1. 15-day limit check for past dates
+    days_diff = (datetime.now().date() - payload.date).days
+    if days_diff > 15:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Attendance window expired: cannot postpone a class from {days_diff} days ago (limit is 15 days)."
+        )
+
+    # 2. Authorization check
+    offering = await db.get(CourseOffering, payload.course_offering_id)
+    if not offering:
+        raise HTTPException(status_code=404, detail="Course offering not found.")
+
+    teacher = await db.get(User, teacher_id)
+    matched_teacher_ids = [teacher_id]
+    if teacher:
+        same_name_ids = (await db.exec(select(User.id).where(User.full_name == teacher.full_name))).all()
+        matched_teacher_ids = list(set(matched_teacher_ids + list(same_name_ids)))
+
+    is_authorized = offering.teacher_id in matched_teacher_ids
+    if not is_authorized:
+        sub_stmt = select(SubstituteGrant).where(
+            SubstituteGrant.course_offering_id == payload.course_offering_id,
+            SubstituteGrant.substitute_teacher_id.in_(matched_teacher_ids),
+            SubstituteGrant.start_date <= payload.date,
+            SubstituteGrant.end_date >= payload.date
+        )
+        active_sub = (await db.exec(sub_stmt)).first()
+        if not active_sub:
+            raise HTTPException(status_code=403, detail="Not authorized to postpone this class.")
+
+    # 3. Check if attendance was already submitted
+    existing_stmt = select(AttendanceSession).where(
+        AttendanceSession.course_offering_id == payload.course_offering_id,
+        AttendanceSession.date == payload.date
+    )
+    existing_session = (await db.exec(existing_stmt)).first()
+    if existing_session and existing_session.is_held and existing_session.status == SessionStatus.SUBMITTED:
+        raise HTTPException(status_code=400, detail="Attendance has already been marked for this session. Use correction requests to modify.")
+
+    # 4. Upsert AttendanceSession as cancelled / not held
+    reason = payload.reason.strip() if payload.reason else "Faculty on Leave"
+    if existing_session:
+        existing_session.is_held = False
+        existing_session.reason_not_held = reason
+        existing_session.status = SessionStatus.CANCELLED
+        existing_session.submitted_at = datetime.utcnow()
+        db.add(existing_session)
+    else:
+        new_session = AttendanceSession(
+            session_uuid=str(uuid.uuid4()),
+            course_offering_id=payload.course_offering_id,
+            teacher_id=teacher_id,
+            date=payload.date,
+            duration_periods=1,
+            mode=SessionMode.MANUAL,
+            is_held=False,
+            reason_not_held=reason,
+            status=SessionStatus.CANCELLED,
+            submitted_at=datetime.utcnow()
+        )
+        db.add(new_session)
+
+    await db.commit()
+
+    # 5. Notify enrolled students in background
+    try:
+        subject = await db.get(Subject, offering.subject_id)
+        subject_name = subject.name if subject else "Class"
+        subject_code = subject.course_code if subject else ""
+        date_str = payload.date.strftime("%d %b %Y")
+
+        student_query = (
+            select(StudentProfile.roll_number, User.full_name)
+            .join(User, StudentProfile.user_id == User.id)
+            .join(StudentSubjectMap, User.id == StudentSubjectMap.student_id)
+            .where(StudentSubjectMap.course_offering_id == payload.course_offering_id)
+        )
+        student_rows = (await db.exec(student_query)).all()
+
+        alerts = [
+            {
+                "roll_number": row[0],
+                "student_name": row[1],
+                "subject_name": subject_name,
+                "subject_code": subject_code,
+                "date_str": date_str,
+                "reason": reason
+            }
+            for row in student_rows if row[0]
+        ]
+
+        if alerts:
+            background_tasks.add_task(
+                notification_service.batch_send_class_postponed_alerts,
+                alerts
+            )
+    except Exception as exc:
+        pass
+
+    return {
+        "status": "success",
+        "message": f"Class on {payload.date.strftime('%a, %d %b')} has been postponed."
+    }
