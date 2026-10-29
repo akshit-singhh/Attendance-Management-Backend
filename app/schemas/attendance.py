@@ -30,6 +30,7 @@ class StudentRosterResponse(BaseModel):
     student_id: int
     roll_number: str
     full_name: str
+    status: Optional[AttendanceStatus] = None
 
 
 class CourseScheduleResponse(BaseModel):

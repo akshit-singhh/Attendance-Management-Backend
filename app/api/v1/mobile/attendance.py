@@ -188,10 +188,12 @@ async def get_pending_classes(
 @router.get("/roster/{course_offering_id}", response_model=List[StudentRosterResponse])
 async def get_class_roster(
     course_offering_id: int,
+    session_date: Optional[date] = None,
+    date: Optional[date] = None,
     teacher_id: int = Depends(require_teacher),
     db: AsyncSession = Depends(get_session)
 ):
-    """Fetch the exact list of students enrolled in this specific course offering."""
+    """Fetch the exact list of students enrolled in this specific course offering, optionally pre-filled with attendance for that date."""
     
     teacher = await db.get(User, teacher_id)
     matched_teacher_ids = [teacher_id]
@@ -203,11 +205,31 @@ async def get_class_roster(
     if not offering or offering.teacher_id not in matched_teacher_ids:
         raise HTTPException(status_code=403, detail="You do not have access to this roster.")
 
+    target_date = session_date or date
+    status_map = {}
+    if target_date:
+        session_stmt = (
+            select(AttendanceSession)
+            .where(
+                AttendanceSession.course_offering_id == course_offering_id,
+                AttendanceSession.date == target_date,
+                AttendanceSession.is_held == True
+            )
+            .order_by(AttendanceSession.id.desc())
+        )
+        existing_session = (await db.exec(session_stmt)).first()
+        if existing_session:
+            rec_stmt = select(AttendanceRecord).where(AttendanceRecord.session_id == existing_session.id)
+            existing_records = (await db.exec(rec_stmt)).all()
+            for r in existing_records:
+                status_map[r.student_id] = r.status
+
     statement = (
         select(User, StudentProfile)
         .join(StudentProfile, User.id == StudentProfile.user_id)
         .join(StudentSubjectMap, User.id == StudentSubjectMap.student_id)
         .where(StudentSubjectMap.course_offering_id == course_offering_id)
+        .order_by(StudentProfile.roll_number.asc(), User.full_name.asc())
     )
     
     results = await db.exec(statement)
@@ -217,7 +239,8 @@ async def get_class_roster(
         roster.append(StudentRosterResponse(
             student_id=user.id,
             roll_number=profile.roll_number,
-            full_name=user.full_name
+            full_name=user.full_name,
+            status=status_map.get(user.id)
         ))
         
     return roster
@@ -277,19 +300,17 @@ async def sync_offline_attendance(
                 detail="Not authorized to sync this session. Assignment removed or substitute grant expired."
             )
 
-    # 3. Duplicate Session Check (Same target and date, but different UUID)
-    duplicate_check_stmt = select(AttendanceSession).where(
-        AttendanceSession.course_offering_id == payload.course_offering_id,
-        AttendanceSession.date == payload.date,
-        AttendanceSession.is_held == True
+    # 3. Check for existing session on the same date and class (to allow direct edits/updates)
+    duplicate_check_stmt = (
+        select(AttendanceSession)
+        .where(
+            AttendanceSession.course_offering_id == payload.course_offering_id,
+            AttendanceSession.date == payload.date,
+            AttendanceSession.is_held == True
+        )
+        .order_by(AttendanceSession.id.desc())
     )
-    duplicate_session = (await db.exec(duplicate_check_stmt)).first()
-    
-    session_flagged = False
-    session_flag_reason = None
-    if duplicate_session:
-        session_flagged = True
-        session_flag_reason = "Duplicate session marked for the same date and class."
+    existing_session = (await db.exec(duplicate_check_stmt)).first()
 
     # 4. Fetch current real-time enrollment to detect Stale Lists
     enrolled_stmt = select(StudentSubjectMap.student_id).where(
@@ -297,22 +318,43 @@ async def sync_offline_attendance(
     )
     enrolled_students = set((await db.exec(enrolled_stmt)).all())
 
-    # 5. Create Parent AttendanceSession
-    new_session = AttendanceSession(
-        session_uuid=payload.session_uuid,
-        course_offering_id=payload.course_offering_id,
-        teacher_id=teacher_id,
-        date=payload.date,
-        duration_periods=payload.duration_periods,
-        mode=payload.mode,
-        is_held=payload.is_held,
-        reason_not_held=payload.reason_not_held,
-        status=SessionStatus.SUBMITTED,
-        submitted_at=datetime.utcnow()
-    )
-    db.add(new_session)
-    await db.commit() 
-    await db.refresh(new_session)
+    # 5. Create or Update AttendanceSession
+    if existing_session:
+        target_session = existing_session
+        target_session.duration_periods = payload.duration_periods
+        target_session.mode = payload.mode
+        target_session.is_held = payload.is_held
+        target_session.reason_not_held = payload.reason_not_held
+        target_session.status = SessionStatus.SUBMITTED
+        target_session.submitted_at = datetime.utcnow()
+        db.add(target_session)
+        await db.commit()
+        await db.refresh(target_session)
+
+        # Remove previous records for this session to store the updated marks
+        old_records_stmt = select(AttendanceRecord).where(AttendanceRecord.session_id == target_session.id)
+        old_records = (await db.exec(old_records_stmt)).all()
+        for old_rec in old_records:
+            await db.delete(old_rec)
+        await db.commit()
+
+        new_session = target_session
+    else:
+        new_session = AttendanceSession(
+            session_uuid=payload.session_uuid,
+            course_offering_id=payload.course_offering_id,
+            teacher_id=teacher_id,
+            date=payload.date,
+            duration_periods=payload.duration_periods,
+            mode=payload.mode,
+            is_held=payload.is_held,
+            reason_not_held=payload.reason_not_held,
+            status=SessionStatus.SUBMITTED,
+            submitted_at=datetime.utcnow()
+        )
+        db.add(new_session)
+        await db.commit() 
+        await db.refresh(new_session)
 
     # 6. Process Individual Student Records
     # Use naive UTC time to match PostgreSQL's default timestamp expectation
@@ -320,8 +362,8 @@ async def sync_offline_attendance(
     db_records = []
     
     for item in payload.records:
-        is_flagged = session_flagged
-        flag_reason = session_flag_reason
+        is_flagged = False
+        flag_reason = None
 
         # Stale List Check
         if item.student_id not in enrolled_students:
