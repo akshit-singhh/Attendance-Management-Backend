@@ -36,14 +36,36 @@ async def login(
     payload: LoginRequest,
     db: AsyncSession = Depends(get_session)
 ):
-    statement = select(User).options(selectinload(User.role_assignments)).where(User.email == payload.email)
+    identifier = payload.email.strip()
+
+    # 1. Search User by email (case-insensitive)
+    statement = (
+        select(User)
+        .options(selectinload(User.role_assignments))
+        .where(func.lower(User.email) == identifier.lower())
+    )
     result = await db.exec(statement)
     user = result.first()
+
+    # 2. If no direct email match, check StudentProfile by roll number (case-insensitive)
+    if not user:
+        clean_roll = identifier.replace("/", "").replace("-", "").replace(" ", "").lower()
+        student_statement = (
+            select(User)
+            .join(StudentProfile, StudentProfile.user_id == User.id)
+            .options(selectinload(User.role_assignments))
+            .where(
+                (func.lower(StudentProfile.roll_number) == identifier.lower()) |
+                (func.replace(func.replace(func.replace(func.lower(StudentProfile.roll_number), "/", ""), "-", ""), " ", "") == clean_roll)
+            )
+        )
+        student_result = await db.exec(student_statement)
+        user = student_result.first()
 
     if not user or not verify_password(payload.password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect email or password",
+            detail="Incorrect email, roll number, or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -208,22 +230,36 @@ async def forgot_password(
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_session)
 ):
-    user_stmt = select(User).where(User.email == payload.email)
+    identifier = payload.email.strip()
+    user_stmt = select(User).where(func.lower(User.email) == identifier.lower())
     user = (await db.exec(user_stmt)).first()
+
+    if not user:
+        clean_roll = identifier.replace("/", "").replace("-", "").replace(" ", "").lower()
+        student_stmt = (
+            select(User)
+            .join(StudentProfile, StudentProfile.user_id == User.id)
+            .where(
+                (func.lower(StudentProfile.roll_number) == identifier.lower()) |
+                (func.replace(func.replace(func.replace(func.lower(StudentProfile.roll_number), "/", ""), "-", ""), " ", "") == clean_roll)
+            )
+        )
+        user = (await db.exec(student_stmt)).first()
 
     if not user or not user.is_active:
         return {"status": "success", "message": "If that account exists, an OTP has been sent."}
 
+    target_email = user.email
     otp_code = str(random.randint(100000, 999999))
     expires_at = datetime.utcnow() + timedelta(minutes=5)
 
-    await db.exec(delete(PasswordResetOTP).where(PasswordResetOTP.email == payload.email))
+    await db.exec(delete(PasswordResetOTP).where(PasswordResetOTP.email == target_email))
 
-    db_otp = PasswordResetOTP(email=payload.email, otp_code=otp_code, expires_at=expires_at)
+    db_otp = PasswordResetOTP(email=target_email, otp_code=otp_code, expires_at=expires_at)
     db.add(db_otp)
     await db.commit()
 
-    background_tasks.add_task(send_otp_email, to_email=payload.email, otp=otp_code)
+    background_tasks.add_task(send_otp_email, to_email=target_email, otp=otp_code)
 
     return {"status": "success", "message": "If that account exists, an OTP has been sent."}
 
@@ -232,8 +268,25 @@ async def reset_password(
     payload: ResetPasswordRequest,
     db: AsyncSession = Depends(get_session)
 ):
+    identifier = payload.email.strip()
+    target_email = identifier
+
+    if "@" not in identifier:
+        clean_roll = identifier.replace("/", "").replace("-", "").replace(" ", "").lower()
+        student_stmt = (
+            select(User)
+            .join(StudentProfile, StudentProfile.user_id == User.id)
+            .where(
+                (func.lower(StudentProfile.roll_number) == identifier.lower()) |
+                (func.replace(func.replace(func.replace(func.lower(StudentProfile.roll_number), "/", ""), "-", ""), " ", "") == clean_roll)
+            )
+        )
+        found_user = (await db.exec(student_stmt)).first()
+        if found_user:
+            target_email = found_user.email
+
     otp_stmt = select(PasswordResetOTP).where(
-        (PasswordResetOTP.email == payload.email) &
+        (func.lower(PasswordResetOTP.email) == target_email.lower()) &
         (PasswordResetOTP.otp_code == payload.otp)
     )
 
@@ -247,7 +300,7 @@ async def reset_password(
         await db.commit()
         raise HTTPException(status_code=400, detail="OTP has expired. Please request a new one.")
 
-    user = (await db.exec(select(User).where(User.email == payload.email))).first()
+    user = (await db.exec(select(User).where(func.lower(User.email) == target_email.lower()))).first()
 
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
