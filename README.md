@@ -10,16 +10,16 @@ The backend is tailored for university environments featuring multiple schools (
 
 This project is an end-to-end academic operations and attendance intelligence platform that handles:
 
-- **Authentication & Extended Session Management**: Secure JWT token-based authentication with token rotation, unified `/auth/me` profile resolution, password management, and extended refresh longevity.
+- **Dual-Mode Authentication & Extended Session Management**: Secure JWT token-based authentication with token rotation, multi-role switching, unified `/auth/me` profile resolution, OTP-based password recovery, and extended refresh longevity. Students can authenticate using **either** their institutional email OR their student roll number.
 - **Hierarchical University Academic Structure**: Full 6-tier institutional chain:
   $$\text{School} \longrightarrow \text{Department} \longrightarrow \text{Programme} \longrightarrow \text{Specialization} \longrightarrow \text{Batch} \longrightarrow \text{Section}$$
 - **Consolidated Class Sections & Group Labels (`batch_label`)**: Timetable entries and practical sessions support `batch_label` (`G-1`, `G-2`, etc.) without splintering classes into phantom duplicate sub-batch sections.
-- **Paginated User Management with Deep Search & Role Filters**: Debounced, production-grade search across users (`email`, `full_name`, `roll_number`) and role assignment filtering with subquery optimization.
+- **Paginated User Management & Complete Account Lifecycle**: Debounced, production-grade search across users (`email`, `full_name`, `roll_number`), role assignment filtering, CSV bulk student onboarding, account activation/deactivation, and administrative password management.
 - **Cascading Filters**: Query endpoints dynamically filtered by parent identifiers (e.g., `school_code` for departments, `department_code` for programmes).
 - **Teacher Allotments & Reassignment**: Allocation of faculty members to course offerings, with support for seamless reassignment across terms.
-- **University Timetable Integration**: Live synchronization and management of schedule slots, rooms, periods, sections, and faculty allotments (including official Samay timetable integration with automatic rebuild utilities).
+- **University Timetable Integration & Sync Engine**: Live schedule synchronization with the university Samay portal, dry-run diff previews, point-in-time snapshots, and one-click rollback utilities.
 - **Credits & Faculty Workload Management**: Credit auditing for students and automatic workload calculation (lecture, lab, practical, hybrid) for faculty members.
-- **Mobile Student Intelligence**: Real-time student dashboard, live day schedule, subject-wise attendance history, safe bunk calculation buffer, and calendar attendance tracking.
+- **Mobile Student Intelligence**: Real-time student dashboard, live day schedule, subject-wise attendance history, safe bunk calculation buffer, and monthly attendance calendar.
 - **Offline Attendance Sync & Validation**: Conflict-resilient offline capture on mobile devices with idempotency checks, device clock-skew detection, and duplicate session prevention.
 - **Live Attendance Sessions & Flagging**: Real-time tracking of marked sessions, attendance percentages, student flags, and historical status audit logs.
 - **Attendance Corrections & Leave Automation**: Student medical leave workflows with document upload, and automated status overrides from `ABSENT` to `LEAVE` with full audit trails.
@@ -139,6 +139,21 @@ The user management endpoint supports high-volume paginated queries with server-
   }
   ```
 
+### 3. User Lifecycle & Administrative Controls
+The user provisioning module (`/api/v1/web/management`) provides administrators with complete control over user accounts and roles:
+
+- **Account Status Toggles**:
+  - `PATCH /users/{user_id}/deactivate`: Instantly deactivates a user account, revoking active session tokens.
+  - `PATCH /users/{user_id}/activate`: Re-enables a suspended account.
+- **Administrative Password Reset (`PATCH /users/{user_id}/password`)**:
+  Allows administrators to directly overwrite a user's password without needing their existing password.
+- **Profile Updates (`PATCH /users/{user_id}/profile`)**:
+  Updates name, employee code, and contact information.
+- **Role Assignment Management (`PUT /users/{user_id}/roles`)**:
+  Assigns, modifies, or scopes institutional roles (`ADMIN`, `DEAN`, `HOD`, `COORDINATOR`, `TEACHER`, `STUDENT`) to any user.
+- **Student Bulk Onboarding (`POST /students/bulk-import`)**:
+  Accepts a CSV payload of student records with roll numbers, full names, section identifiers, and emails for batch provisioning.
+
 ---
 
 ## 5. Credits & Faculty Workload Management
@@ -167,7 +182,15 @@ Located under `/api/v1/web/credits`:
   - **By Faculty**: View personal timetable for a teacher.
   - **By Room / Department**: View room occupancy.
 
-### Timetable Synchronization Utilities:
+### Live Samay Portal Sync Engine (`/api/v1/web/timetable`):
+- **Live Metadata (`GET /samay/metadata`)**: Inspects official university Samay server status, academic year, and active terms.
+- **Raw Samay Slots (`GET /samay/slots`)**: Directly extracts un-mutated schedule rows from Samay for debugging and audit verification.
+- **Dry-Run Diff Preview (`GET /sync/preview`)**: Compares external schedule rows against the local database, outputting a precise diff of slots to insert, modify, or remove before committing.
+- **Transactional Sync Apply (`POST /sync/apply`)**: Safely updates database timetable slots within an ACID transaction while capturing a point-in-time snapshot.
+- **Sync History Audit (`GET /sync/history`)**: Lists all historical sync operations with author identity, timestamp, and slot change counts.
+- **One-Click Rollback (`POST /sync/rollback/{sync_id}`)**: Reverts timetable state back to any prior snapshot if an erroneous external sync occurred.
+
+### CLI Synchronization Utilities:
 - **`rebuild_and_sync.py`**:
   ```bash
   python rebuild_and_sync.py
@@ -189,12 +212,20 @@ Located under `/api/v1/web/credits`:
   - **Safe Bunk Calculation Buffer**: Calculates how many classes a student can safely miss before dropping below the required 75% limit, or how many consecutive classes are required to recover.
   - Attendance alerts (`On Track`, `Needs Attention`, `No Sessions`).
 - **`GET /schedule`**: Returns the student's live weekly timetable schedule, sorted by time, with room and group badges (`G-1` / `G-2`).
+- **`GET /calendar`**: Monthly student attendance calendar with date-by-date attendance chips (Present, Absent, Leave, Holiday) and session timestamps.
 - **`GET /history`**: Comprehensive subject-wise breakdown of attendance history, including monthly breakdown and session timestamps.
+
+### Mobile Timetable Schedules (`/api/v1/mobile/timetable`)
+- **`GET /student`**: Comprehensive weekly day-by-day timetable schedule for the authenticated student.
+- **`GET /teacher`**: Full weekly schedule for faculty members with period numbers, rooms, and assigned section batches.
 
 ### Teacher Attendance & Roll Call (`/api/v1/mobile/attendance`)
 - **`GET /classes`**: Retrieves all class offerings allotted to the teacher.
+- **`GET /pending`**: Retrieves all pending attendance sessions awaiting roll call.
+- **`GET /roster/{course_offering_id}`**: Retrieves active student roster for a class section.
 - **`POST /roll-call`**: Submits live roll call attendance for a specific session with immediate record persistence.
 - **`POST /sync`**: Reconciles batch offline attendance sessions captured on mobile devices.
+- **`POST /postpone`**: Marks a class session as postponed / rescheduled with updated schedule details.
 
 ---
 
@@ -202,15 +233,26 @@ Located under `/api/v1/web/credits`:
 
 Located in `app/api/v1/auth.py` and `app/core/security.py`:
 
+- **Dual-Mode Identifier Resolution (Email or Roll Number)**:
+  - Faculty and administrative authorities authenticate using their registered institutional email address.
+  - Students can authenticate using **either** their university email address OR their student roll number (e.g., `235ICS001` or `student@gbu.ac.in`).
+  - The backend resolves the identifier case-insensitively against `User.email` first; if not found, it queries `StudentProfile.roll_number` and retrieves the foreign-key linked `User` record.
+  - This dual-mode resolution is also available for password recovery (`/forgot-password` and `/reset-password`).
 - **Unified Profile (`GET /api/v1/auth/me`)**:
-  Resolves the current authenticated user's profile including primary role, array of active roles (`roles`), academic scope (`DEPARTMENT`, `PROGRAM`, `SCHOOL`, `UNIVERSITY`), student roll number, program name, department name, school, batch, and faculty employee code.
-- **Password Management (`POST /api/v1/auth/change-password`)**:
-  Allows users to securely change their password by validating their old password against stored bcrypt hashes.
+  Resolves the current authenticated user's profile including primary active role, array of assigned roles (`roles` and `available_roles`), academic scope (`DEPARTMENT`, `PROGRAM`, `SCHOOL`, `UNIVERSITY`), student roll number, program name, department name, school, batch, and faculty employee code.
+- **Multi-Role Context Switching (`POST /api/v1/auth/switch-role`)**:
+  Allows users with multiple role assignments (e.g. Dean <-> HOD <-> Coordinator) to switch their active operational role and institutional scope on demand, receiving a new scoped access token without re-authenticating.
+- **Password Recovery & OTP Dispatch (`POST /api/v1/auth/forgot-password`)**:
+  Dispatches a secure 6-digit one-time authorization code (OTP) to the user's registered institutional email address. Accepts either an email or a student roll number as the identifier.
+- **Password Reset via OTP (`POST /api/v1/auth/reset-password`)**:
+  Validates the 6-digit OTP code against the registered user and updates their password hash securely.
+- **Direct Password Management (`POST /api/v1/auth/change-password`)**:
+  Allows authenticated users to update their password by validating their old password against stored bcrypt hashes.
 - **JWT Dual-Token Strategy**: Returns a short-lived `access_token` and a persistent `refresh_token`.
 - **Extended Token Longevity**: Designed for long active sessions (up to 60 days with periodic refresh) to ensure faculty and mobile users are not disrupted by repetitive logins.
 - **Token Rotation**: Each refresh generates a new secure refresh token while invalidating the old token to prevent replay attacks.
 - **Role Hierarchy**:
-  - `ADMIN`: University-wide scope.
+  - `ADMIN`: University-wide administrative governance scope.
   - `DEAN`: University school scope.
   - `HOD`: Department scope.
   - `COORDINATOR`: Programme/Batch scope.
@@ -310,35 +352,67 @@ docker run -d --name attendance-api --env-file .env -p 8000:8000 attendance-back
 
 | Category | Method | Path | Description |
 |---|---|---|---|
-| **Auth** | `POST` | `/api/v1/auth/login` | Email/password login with JWT access & refresh tokens |
-| **Auth** | `POST` | `/api/v1/auth/refresh` | Refresh access token with rotation |
+| **Auth** | `POST` | `/api/v1/auth/login` | Dual-mode login: authenticates via institutional **Email** OR student **Roll Number** with JWT tokens |
+| **Auth** | `POST` | `/api/v1/auth/refresh` | Refresh access token with secure token rotation |
 | **Auth** | `POST` | `/api/v1/auth/logout` | Revoke active refresh token |
-| **Auth** | `GET` | `/api/v1/auth/me` | Fetch authenticated user profile, roles, and academic metadata |
+| **Auth** | `GET` | `/api/v1/auth/me` | Fetch authenticated user profile, active role, assigned roles, and academic metadata |
+| **Auth** | `POST` | `/api/v1/auth/switch-role` | Switch active role context (e.g. Dean <-> HOD <-> Coordinator) and re-issue scoped JWT |
 | **Auth** | `POST` | `/api/v1/auth/change-password` | Update account password with old password verification |
+| **Auth** | `POST` | `/api/v1/auth/forgot-password` | Dispatch 6-digit OTP to user's registered email (supports email or roll number lookup) |
+| **Auth** | `POST` | `/api/v1/auth/reset-password` | Verify 6-digit OTP and reset password (supports email or roll number lookup) |
 | **Academic** | `GET/POST`| `/api/v1/web/management/schools` | List and create university schools |
 | **Academic** | `GET/POST`| `/api/v1/web/management/departments` | List (with `?school_code`) and create departments |
 | **Academic** | `GET/POST`| `/api/v1/web/management/programmes` | List (with `?department_code`) and create programmes |
 | **Academic** | `GET/POST`| `/api/v1/web/management/specializations`| List and create specializations |
 | **Academic** | `GET/POST`| `/api/v1/web/management/batches` | List (with `?specialization_id`) and create batches |
 | **Academic** | `GET/POST`| `/api/v1/web/management/sections` | List and create class sections |
+| **Academic** | `DELETE` | `/api/v1/web/management/schools/{id}` | Delete university school record |
+| **Academic** | `DELETE` | `/api/v1/web/management/departments/{id}` | Delete department record |
+| **Academic** | `DELETE` | `/api/v1/web/management/programmes/{id}` | Delete programme record |
+| **Academic** | `DELETE` | `/api/v1/web/management/batches/{id}` | Delete batch record |
+| **Academic** | `DELETE` | `/api/v1/web/management/sections/{id}` | Delete section record |
 | **Users** | `GET` | `/api/v1/web/management/users` | Paginated users list with `search`, `role`, `page`, and `size` |
 | **Users** | `POST` | `/api/v1/web/management/users` | Create a new user with initial role & scope |
+| **Users** | `PATCH`| `/api/v1/web/management/users/{id}/deactivate` | Deactivate user account |
+| **Users** | `PATCH`| `/api/v1/web/management/users/{id}/activate` | Reactivate user account |
+| **Users** | `PATCH`| `/api/v1/web/management/users/{id}/password` | Administrative password overwrite |
+| **Users** | `PATCH`| `/api/v1/web/management/users/{id}/profile` | Update user personal details and employee code |
+| **Users** | `PUT` | `/api/v1/web/management/users/{id}/roles` | Modify user assigned roles and institutional scopes |
+| **Users** | `POST` | `/api/v1/web/management/students/bulk-import` | Batch onboard students from CSV payload |
 | **Offerings** | `POST` | `/api/v1/web/management/offerings/reassign` | Reassign course offering to a new teacher |
+| **Timetable Sync** | `GET` | `/api/v1/web/timetable/samay/metadata` | Live status and metadata from external Samay portal |
+| **Timetable Sync** | `GET` | `/api/v1/web/timetable/samay/slots` | Raw schedule slots from Samay |
+| **Timetable Sync** | `GET` | `/api/v1/web/timetable/sync/preview` | Dry-run diff preview comparing external vs. local slots |
+| **Timetable Sync** | `POST` | `/api/v1/web/timetable/sync/apply` | Transactional synchronization apply with snapshot creation |
+| **Timetable Sync** | `GET` | `/api/v1/web/timetable/sync/history` | Historical audit logs of all timetable sync runs |
+| **Timetable Sync** | `POST` | `/api/v1/web/timetable/sync/rollback/{sync_id}` | Revert timetable schedule back to a prior snapshot |
+| **Timetable** | `GET/POST`| `/api/v1/web/timetable/slots` | Timetable matrix slots and scheduling |
 | **Credits** | `GET` | `/api/v1/web/credits/faculty-workload` | Detailed workload breakdown per faculty |
 | **Credits** | `GET` | `/api/v1/web/credits/student-credit-audit` | Student credit status report |
 | **Credits** | `POST` | `/api/v1/web/credits/sync-from-timetable` | Sync credits directly from timetable contact hours |
-| **Timetable** | `GET/POST`| `/api/v1/web/timetable/slots` | Timetable matrix slots and scheduling |
-| **Mobile Student** | `GET` | `/api/v1/mobile/student/dashboard` | Student dashboard metrics & safe bunk buffer calculation |
-| **Mobile Student** | `GET` | `/api/v1/mobile/student/schedule` | Student weekly class schedule with group badges (`G-1`, `G-2`) |
-| **Mobile Student** | `GET` | `/api/v1/mobile/student/history` | Historical attendance records by subject and month |
-| **Mobile Attendance** | `GET` | `/api/v1/mobile/attendance/classes` | Teacher class list and active offerings |
-| **Mobile Attendance** | `POST` | `/api/v1/mobile/attendance/roll-call` | Live attendance roll call submission |
-| **Mobile Attendance** | `POST` | `/api/v1/mobile/attendance/sync` | High-speed offline attendance sync |
-| **Attendance**| `GET` | `/api/v1/web/attendance-sessions` | Real-time session monitoring with anomaly flags |
+| **Credits** | `PATCH`| `/api/v1/web/credits/subjects/{id}` | Update subject credits and lecture/lab category |
+| **Attendance Monitoring** | `GET` | `/api/v1/web/attendance-sessions` | Real-time session monitoring with anomaly flags |
+| **Attendance Monitoring** | `GET` | `/api/v1/web/attendance-sessions/{id}` | Detailed roll call log for a specific session |
+| **Corrections**| `GET` | `/api/v1/web/corrections` | List attendance dispute correction requests |
+| **Corrections**| `GET` | `/api/v1/web/corrections/pending` | Filtered queue of pending corrections for HOD |
+| **Corrections**| `POST` | `/api/v1/web/corrections/{id}/resolve` | Approve or reject a student attendance dispute |
+| **Corrections**| `POST` | `/api/v1/web/corrections/bulk-resolve` | Bulk resolve multiple attendance correction requests |
+| **Leaves** | `POST` | `/api/v1/web/leaves/{id}/approve` | Approve leave & auto-override matching absences |
 | **Audit** | `GET` | `/api/v1/web/audit-logs` | System-wide administrative audit trail |
 | **Dashboard** | `GET` | `/api/v1/admin/dashboard/stats` | High-level user counts and summary metrics |
 | **Dashboard** | `GET` | `/api/v1/admin/dashboard/action-items` | Actionable pending items (leaves, unassigned, etc.) |
 | **Dashboard** | `GET` | `/api/v1/admin/dashboard/attendance-pulse` | Daily classes held and attendance percentage |
 | **Dashboard** | `GET` | `/api/v1/admin/dashboard/setup-health` | Academic setup diagnostics |
-| **Leaves** | `POST` | `/api/v1/mobile/leaves/apply` | Student leave application with file upload |
-| **Leaves** | `POST` | `/api/v1/web/leaves/{id}/approve` | Approve leave & auto-override matching absences |
+| **Mobile Student** | `GET` | `/api/v1/mobile/student/dashboard` | Student dashboard metrics & safe bunk buffer calculation |
+| **Mobile Student** | `GET` | `/api/v1/mobile/student/schedule` | Student weekly class schedule with group badges (`G-1`, `G-2`) |
+| **Mobile Student** | `GET` | `/api/v1/mobile/student/calendar` | Monthly student attendance calendar with daily attendance status |
+| **Mobile Student** | `GET` | `/api/v1/mobile/student/history` | Historical attendance records by subject and month |
+| **Mobile Timetable** | `GET` | `/api/v1/mobile/timetable/student` | Comprehensive student weekly timetable lookup |
+| **Mobile Timetable** | `GET` | `/api/v1/mobile/timetable/teacher` | Comprehensive faculty weekly timetable lookup |
+| **Mobile Attendance** | `GET` | `/api/v1/mobile/attendance/classes` | Teacher class list and active offerings |
+| **Mobile Attendance** | `GET` | `/api/v1/mobile/attendance/pending` | Classes awaiting attendance submission |
+| **Mobile Attendance** | `GET` | `/api/v1/mobile/attendance/roster/{offering_id}` | Student roster for selected class offering |
+| **Mobile Attendance** | `POST` | `/api/v1/mobile/attendance/roll-call` | Live attendance roll call submission |
+| **Mobile Attendance** | `POST` | `/api/v1/mobile/attendance/sync` | High-speed offline attendance sync |
+| **Mobile Attendance** | `POST` | `/api/v1/mobile/attendance/postpone` | Mark a scheduled class as postponed or rescheduled |
+| **Mobile Leaves** | `POST` | `/api/v1/mobile/leaves/apply` | Student leave application with medical certificate file upload |
