@@ -112,9 +112,6 @@ class TeacherTimetableResponse(BaseModel):
     day_definitions: Dict[int, str]
 
 
-
-
-
 @router.get("/teacher", response_model=TeacherTimetableResponse)
 
 async def get_teacher_timetable(
