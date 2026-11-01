@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
-from app.api.v1 import auth
+from app.api.v1 import auth, health
 from app.api.v1.mobile import attendance as mobile_attendance
 from app.api.v1.mobile import student as mobile_student
 from app.api.v1.web import management as web_management
@@ -55,6 +55,9 @@ app.mount("/static/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 
 # --- API ROUTER REGISTRATION ---
+
+# Health Endpoint
+app.include_router(health.router, prefix="/health", tags=["Health"])
 
 app.include_router(
     auth.router, 

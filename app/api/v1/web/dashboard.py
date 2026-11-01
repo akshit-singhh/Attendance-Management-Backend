@@ -2,7 +2,6 @@ from fastapi import APIRouter, Depends
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlmodel import select
 from sqlalchemy import func
-from pydantic import BaseModel
 from datetime import date
 
 from app.core.database import get_session

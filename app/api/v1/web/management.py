@@ -5,7 +5,6 @@ from sqlmodel import select, or_, delete
 from sqlalchemy.orm import selectinload
 
 from typing import List, Optional
-from pydantic import BaseModel
 from sqlalchemy import func, distinct
 
 from app.core.database import get_session

@@ -2,7 +2,6 @@ from sqlmodel import SQLModel, Field, Relationship
 from typing import Optional, List
 from datetime import date, datetime
 from enum import Enum
-from pydantic import BaseModel
 
 class AttendanceStatus(str, Enum):
     PRESENT = "PRESENT"

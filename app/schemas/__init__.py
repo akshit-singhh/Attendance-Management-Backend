@@ -87,6 +87,23 @@ from app.schemas.dashboard import (
 from app.schemas.student import (
     SubjectAttendanceHistory,
     StudentDashboardResponse,
+    CalendarClassItem,
+    CalendarDayData,
+    StudentCalendarResponse,
+)
+
+from app.schemas.timetable import (
+    TimetableSlotItem,
+    TeachingWorkloadItem,
+    TeacherTimetableResponse,
+    SyncApplyRequest,
+)
+
+from app.schemas.health import (
+    DatabaseCheck,
+    StorageCheck,
+    AppMetadata,
+    HealthCheckResponse,
 )
 
 __all__ = [
@@ -115,6 +132,8 @@ __all__ = [
     "BatchCreate",
     "SectionCreate",
     "SubjectCreate",
+    "SubjectUpdate",
+    "SubjectResponse",
     "TermCreate",
     "CourseOfferingCreate",
     "CourseOfferingListResponse",
@@ -122,6 +141,19 @@ __all__ = [
     "BulkEnrollmentCreate",
     "FacultyResponse",
     "TimetableSlotResponse",
+    "FacultyCourseLoadItem",
+    "TeacherWorkloadItem",
+    "FacultyWorkloadReportResponse",
+    "StudentEnrolledCourseItem",
+    "StudentCreditAuditItem",
+    "StudentCreditAuditResponse",
+    "SyncCreditsResult",
+    "StudentAcademicCourse",
+    "StudentAcademicItem",
+    "PaginatedStudentAcademicResponse",
+    "StudentImportItem",
+    "StudentBulkImportRequest",
+    "StudentBulkImportResponse",
     # Attendance
     "SyncRecordItem",
     "OfflineSyncPayload",
@@ -148,4 +180,17 @@ __all__ = [
     # Student
     "SubjectAttendanceHistory",
     "StudentDashboardResponse",
+    "CalendarClassItem",
+    "CalendarDayData",
+    "StudentCalendarResponse",
+    # Timetable
+    "TimetableSlotItem",
+    "TeachingWorkloadItem",
+    "TeacherTimetableResponse",
+    "SyncApplyRequest",
+    # Health
+    "DatabaseCheck",
+    "StorageCheck",
+    "AppMetadata",
+    "HealthCheckResponse",
 ]

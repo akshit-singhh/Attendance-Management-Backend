@@ -8,7 +8,6 @@ from datetime import datetime
 from typing import List, Optional, Dict, Any
 
 from fastapi import APIRouter, Depends, Query, HTTPException, status
-from pydantic import BaseModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlmodel import select
 
@@ -23,6 +22,7 @@ from app.models.attendance import AttendanceSession
 from sqlalchemy import func, distinct, or_
 from sqlmodel import delete
 from app.schemas.academic import TimetableSlotResponse
+from app.schemas.timetable import SyncApplyRequest
 
 router = APIRouter()
 
@@ -569,12 +569,7 @@ async def list_local_timetable(
 # SAFE TIMETABLE SYNC & ROLLBACK (Approach A + B: Diff Preview + Snapshot + 1-Click Rollback)
 # ---------------------------------------------------------------------------
 
-class SyncApplyRequest(BaseModel):
-    section_name: str
-    samay_section_id: Optional[str] = None
-    school: Optional[str] = None
-    dept: Optional[str] = None
-    auto_enroll_students: bool = True
+# SyncApplyRequest moved to app.schemas.timetable
 
 
 @router.get("/sync/preview", tags=["Timetable - Official Sync"])

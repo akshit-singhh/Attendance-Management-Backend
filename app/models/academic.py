@@ -3,7 +3,6 @@
 from sqlmodel import SQLModel, Field, Relationship
 from typing import Optional, List
 from datetime import date, time, datetime
-from pydantic import BaseModel
 from enum import Enum
 
 # --- 1. 6-Tier Hierarchical Structure (School -> Department -> Programme -> Specialization -> Batch -> Section) ---

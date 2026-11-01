@@ -352,6 +352,7 @@ docker run -d --name attendance-api --env-file .env -p 8000:8000 attendance-back
 
 | Category | Method | Path | Description |
 |---|---|---|---|
+| **Health** | `GET` | `/health` | Production health check: verifies PostgreSQL connectivity, database latency, filesystem storage write permissions, uptime, and app metadata (returns 200 or 503) |
 | **Auth** | `POST` | `/api/v1/auth/login` | Dual-mode login: authenticates via institutional **Email** OR student **Roll Number** with JWT tokens |
 | **Auth** | `POST` | `/api/v1/auth/refresh` | Refresh access token with secure token rotation |
 | **Auth** | `POST` | `/api/v1/auth/logout` | Revoke active refresh token |
