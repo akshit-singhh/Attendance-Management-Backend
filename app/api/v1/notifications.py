@@ -19,6 +19,7 @@ from app.models.notification import (
     NotificationType,
     NotificationPriority,
     NotificationScope,
+    NotificationDeliveryStatus,
 )
 from app.schemas.notification import (
     NotificationCreate,
@@ -51,6 +52,84 @@ async def get_or_create_setting(db: AsyncSession, key: str, default_val: str, de
 # ---------------------------------------------------------------------------
 
 
+async def resolve_notification_recipients(
+    db: AsyncSession,
+    scope_type: NotificationScope,
+    scope_id: Optional[int],
+    target_role: Optional[str] = "ALL",
+    sender_id: Optional[int] = None
+) -> List[int]:
+    """
+    Resolves eligible recipient User IDs matching the notification target scope and role filter.
+    Excludes sender if specified.
+    """
+    target_role_filter = target_role.upper() if target_role else "ALL"
+    recipient_user_ids = set()
+
+    if scope_type == NotificationScope.UNIVERSITY:
+        user_stmt = select(User.id).where(User.is_active == True)
+        if target_role_filter != "ALL":
+            sub_r = select(RoleAssignment.user_id).where(RoleAssignment.role == target_role_filter)
+            user_stmt = user_stmt.where(User.id.in_(sub_r))
+        recipient_user_ids.update((await db.exec(user_stmt)).all())
+
+    elif scope_type == NotificationScope.DEPARTMENT:
+        dept_id = scope_id
+        if dept_id:
+            st_sub = (
+                select(StudentProfile.user_id)
+                .join(Batch, StudentProfile.batch_id == Batch.id)
+                .join(Programme, Batch.programme_id == Programme.id)
+                .where(Programme.department_id == dept_id)
+            )
+            fac_sub = (
+                select(RoleAssignment.user_id)
+                .where(RoleAssignment.scope_type == ScopeTypeEnum.DEPARTMENT, RoleAssignment.scope_id == dept_id)
+            )
+
+            if target_role_filter == "STUDENT":
+                stmt_u = select(User.id).where(User.id.in_(st_sub), User.is_active == True)
+            elif target_role_filter in ("TEACHER", "FACULTY"):
+                stmt_u = select(User.id).where(User.id.in_(fac_sub), User.is_active == True)
+            else:
+                stmt_u = select(User.id).where(or_(User.id.in_(st_sub), User.id.in_(fac_sub)), User.is_active == True)
+
+            recipient_user_ids.update((await db.exec(stmt_u)).all())
+
+    elif scope_type == NotificationScope.BATCH:
+        batch_id = scope_id
+        if batch_id:
+            stmt_u = (
+                select(StudentProfile.user_id)
+                .join(User, StudentProfile.user_id == User.id)
+                .where(StudentProfile.batch_id == batch_id, User.is_active == True)
+            )
+            recipient_user_ids.update((await db.exec(stmt_u)).all())
+
+    elif scope_type == NotificationScope.SECTION:
+        sec_id = scope_id
+        if sec_id:
+            stmt_u = (
+                select(StudentSubjectMap.student_id)
+                .join(CourseOffering, StudentSubjectMap.course_offering_id == CourseOffering.id)
+                .where(CourseOffering.section_id == sec_id)
+            )
+            recipient_user_ids.update((await db.exec(stmt_u)).all())
+
+    elif scope_type == NotificationScope.INDIVIDUAL:
+        if scope_id:
+            recipient_user_ids.add(scope_id)
+
+    else:
+        user_stmt = select(User.id).where(User.is_active == True)
+        recipient_user_ids.update((await db.exec(user_stmt)).all())
+
+    if sender_id:
+        recipient_user_ids.discard(sender_id)
+
+    return list(recipient_user_ids)
+
+
 async def dispatch_notification_fanout(
     notification_id: int,
     recipient_user_ids: List[int],
@@ -61,24 +140,49 @@ async def dispatch_notification_fanout(
     action_url: Optional[str] = None
 ):
     """
-    Decoupled Asynchronous Fan-Out & Multi-Channel Push Worker:
-    1. Chunks recipient database inserts (500 records/batch) to keep connection and memory bounded.
-    2. Queries registered active device tokens (FCM/Mobile) for recipients.
-    3. Triggers mobile push delivery with title, body, priority and deep-linking data.
-    4. Automatically deactivates unregistered/expired device tokens reported by FCM.
+    Crash-Resilient Decoupled Asynchronous Fan-Out & Push Worker:
+    1. Updates notification status to PROCESSING.
+    2. Filters out recipients who already received the notification (idempotency against crashes/restarts).
+    3. Batches inserts in chunks of 500, updating processed_count per transaction.
+    4. Triggers multi-channel FCM mobile push delivery with deep-link metadata.
+    5. Inactivates dead / unregistered device tokens reported by FCM.
+    6. Marks notification as COMPLETED, or FAILED if an unrecoverable exception is caught.
     """
-    if not recipient_user_ids:
-        return
-
     async_session_maker = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     now = datetime.utcnow()
     CHUNK_SIZE = 500
 
-    # 1. Chunked In-App Fan-Out Insertion
-    try:
+    if not recipient_user_ids:
         async with async_session_maker() as session:
-            for i in range(0, len(recipient_user_ids), CHUNK_SIZE):
-                chunk = recipient_user_ids[i:i + CHUNK_SIZE]
+            notif = await session.get(Notification, notification_id)
+            if notif:
+                notif.status = NotificationDeliveryStatus.COMPLETED
+                notif.processed_count = 0
+                await session.commit()
+        return
+
+    try:
+        # Step 1: Mark as PROCESSING in state machine
+        async with async_session_maker() as session:
+            notif = await session.get(Notification, notification_id)
+            if notif:
+                notif.status = NotificationDeliveryStatus.PROCESSING
+                await session.commit()
+
+        # Step 2: Query already created recipients to ensure idempotency across restarts
+        async with async_session_maker() as session:
+            stmt_existing = (
+                select(NotificationRecipient.user_id)
+                .where(NotificationRecipient.notification_id == notification_id)
+            )
+            already_processed_ids = set((await session.exec(stmt_existing)).all())
+
+        pending_user_ids = [uid for uid in recipient_user_ids if uid not in already_processed_ids]
+
+        # Step 3: Insert recipients in bounded chunks
+        for i in range(0, len(pending_user_ids), CHUNK_SIZE):
+            chunk = pending_user_ids[i:i + CHUNK_SIZE]
+            async with async_session_maker() as session:
                 recipients = [
                     NotificationRecipient(
                         notification_id=notification_id,
@@ -89,59 +193,123 @@ async def dispatch_notification_fanout(
                     for uid in chunk
                 ]
                 session.add_all(recipients)
+                
+                # Update processed_count on notification
+                notif = await session.get(Notification, notification_id)
+                if notif:
+                    notif.processed_count = len(already_processed_ids) + i + len(chunk)
+                    session.add(notif)
+                    
                 await session.commit()
-    except Exception as exc:
-        print(f"Failed during recipient fan-out chunk insertion for notification {notification_id}: {exc}")
 
-    # 2. Query Active Device Tokens for Mobile Push
-    try:
+        # Step 4: Dispatch Firebase FCM Push to active mobile devices
         async with async_session_maker() as session:
-            stmt = (
+            stmt_tokens = (
                 select(UserDeviceToken)
                 .where(
                     UserDeviceToken.user_id.in_(recipient_user_ids),
                     UserDeviceToken.is_active == True
                 )
             )
-            device_tokens_records = (await session.exec(stmt)).all()
+            device_tokens_records = (await session.exec(stmt_tokens)).all()
 
-            if not device_tokens_records:
-                return
+            if device_tokens_records:
+                tokens = list({dt.fcm_token for dt in device_tokens_records if dt.fcm_token})
 
-            tokens = list({dt.fcm_token for dt in device_tokens_records if dt.fcm_token})
+                extra_data = {
+                    "notification_id": str(notification_id),
+                    "notification_type": notification_type,
+                    "priority": priority,
+                    "action_url": action_url or ""
+                }
 
-            # 3. Dispatch Push Notifications via Notification Service
-            extra_data = {
-                "notification_id": str(notification_id),
-                "notification_type": notification_type,
-                "priority": priority,
-                "action_url": action_url or ""
-            }
-
-            dispatch_result = await notification_service.send_broadcast_push(
-                tokens=tokens,
-                title=title,
-                message=message,
-                priority=priority,
-                extra_data=extra_data
-            )
-
-            # 4. Invalidate Unregistered / Expired Tokens
-            invalid_tokens = dispatch_result.get("invalid_tokens", [])
-            if invalid_tokens:
-                inv_stmt = (
-                    select(UserDeviceToken)
-                    .where(UserDeviceToken.fcm_token.in_(invalid_tokens))
+                dispatch_result = await notification_service.send_broadcast_push(
+                    tokens=tokens,
+                    title=title,
+                    message=message,
+                    priority=priority,
+                    extra_data=extra_data
                 )
-                bad_records = (await session.exec(inv_stmt)).all()
-                for rec in bad_records:
-                    rec.is_active = False
-                    rec.updated_at = datetime.utcnow()
-                    session.add(rec)
+
+                # Invalidate unregistered / expired FCM tokens
+                invalid_tokens = dispatch_result.get("invalid_tokens", [])
+                if invalid_tokens:
+                    inv_stmt = (
+                        select(UserDeviceToken)
+                        .where(UserDeviceToken.fcm_token.in_(invalid_tokens))
+                    )
+                    bad_records = (await session.exec(inv_stmt)).all()
+                    for rec in bad_records:
+                        rec.is_active = False
+                        rec.updated_at = datetime.utcnow()
+                        session.add(rec)
+                    await session.commit()
+
+        # Step 5: Mark COMPLETED
+        async with async_session_maker() as session:
+            notif = await session.get(Notification, notification_id)
+            if notif:
+                notif.status = NotificationDeliveryStatus.COMPLETED
+                notif.processed_count = len(recipient_user_ids)
                 await session.commit()
 
     except Exception as exc:
-        print(f"Failed during mobile push dispatch for notification {notification_id}: {exc}")
+        print(f"[NOTIFICATION WORKER ERROR] Fan-out failure for notification {notification_id}: {exc}")
+        try:
+            async with async_session_maker() as session:
+                notif = await session.get(Notification, notification_id)
+                if notif:
+                    notif.status = NotificationDeliveryStatus.FAILED
+                    notif.failure_reason = str(exc)[:500]
+                    await session.commit()
+        except Exception as inner_exc:
+            print(f"[NOTIFICATION WORKER ERROR] Could not persist failure state: {inner_exc}")
+
+
+async def recover_interrupted_notifications():
+    """
+    Self-healing startup recovery sweeper:
+    Discovers broadcasts left in PENDING or PROCESSING states (e.g. following sudden server termination, 
+    unhandled crashes, or transient database drops) and automatically resumes delivery safely without duplicating records.
+    """
+    async_session_maker = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with async_session_maker() as session:
+        stmt = (
+            select(Notification)
+            .where(
+                Notification.status.in_([
+                    NotificationDeliveryStatus.PENDING,
+                    NotificationDeliveryStatus.PROCESSING
+                ])
+            )
+            .order_by(Notification.created_at.asc())
+        )
+        stuck_notifications = (await session.exec(stmt)).all()
+        if not stuck_notifications:
+            return
+
+        print(f"[NOTIFICATION RECOVERY] Found {len(stuck_notifications)} interrupted notification(s). Resuming delivery...")
+        for notif in stuck_notifications:
+            try:
+                recipients = await resolve_notification_recipients(
+                    db=session,
+                    scope_type=notif.scope_type,
+                    scope_id=notif.scope_id,
+                    target_role=notif.target_role,
+                    sender_id=notif.sender_id
+                )
+                await dispatch_notification_fanout(
+                    notification_id=notif.id,
+                    recipient_user_ids=recipients,
+                    title=notif.title,
+                    message=notif.message,
+                    priority=notif.priority.value if hasattr(notif.priority, "value") else str(notif.priority),
+                    notification_type=notif.notification_type.value if hasattr(notif.notification_type, "value") else str(notif.notification_type),
+                    action_url=notif.action_url
+                )
+                print(f"[NOTIFICATION RECOVERY] Notification {notif.id} resumed and completed successfully.")
+            except Exception as e:
+                print(f"[NOTIFICATION RECOVERY] Failed to resume notification {notif.id}: {e}")
 
 
 @router.post("/broadcast", response_model=NotificationBroadcastResponse, status_code=status.HTTP_202_ACCEPTED, tags=["Notifications"])
@@ -204,83 +372,26 @@ async def send_broadcast(
             detail="Only University Administrators can send university-wide broadcasts."
         )
 
+    if payload.scope_type == NotificationScope.DEPARTMENT and not payload.scope_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Department ID is required.")
+    if payload.scope_type == NotificationScope.BATCH and not payload.scope_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Batch ID is required.")
+    if payload.scope_type == NotificationScope.SECTION and not payload.scope_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Section ID is required.")
+    if payload.scope_type == NotificationScope.INDIVIDUAL and not payload.scope_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Recipient User ID is required.")
+
     # 4. Resolve Target Audience User IDs
     target_role_filter = payload.target_role.upper() if payload.target_role else "ALL"
-    recipient_user_ids = set()
+    recipient_list = await resolve_notification_recipients(
+        db=db,
+        scope_type=payload.scope_type,
+        scope_id=payload.scope_id,
+        target_role=target_role_filter,
+        sender_id=current_user.id
+    )
 
-    # Query matching users based on scope
-    if payload.scope_type == NotificationScope.UNIVERSITY:
-        user_stmt = select(User.id).where(User.is_active == True)
-        if target_role_filter != "ALL":
-            sub_r = select(RoleAssignment.user_id).where(RoleAssignment.role == target_role_filter)
-            user_stmt = user_stmt.where(User.id.in_(sub_r))
-        recipient_user_ids.update((await db.exec(user_stmt)).all())
-
-    elif payload.scope_type == NotificationScope.DEPARTMENT:
-        dept_id = payload.scope_id
-        if not dept_id:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Department ID is required.")
-        
-        # Students in department
-        st_sub = (
-            select(StudentProfile.user_id)
-            .join(Batch, StudentProfile.batch_id == Batch.id)
-            .join(Programme, Batch.programme_id == Programme.id)
-            .where(Programme.department_id == dept_id)
-        )
-        # Teachers / Staff in department
-        fac_sub = (
-            select(RoleAssignment.user_id)
-            .where(RoleAssignment.scope_type == ScopeTypeEnum.DEPARTMENT, RoleAssignment.scope_id == dept_id)
-        )
-
-        if target_role_filter == "STUDENT":
-            stmt_u = select(User.id).where(User.id.in_(st_sub), User.is_active == True)
-        elif target_role_filter in ("TEACHER", "FACULTY"):
-            stmt_u = select(User.id).where(User.id.in_(fac_sub), User.is_active == True)
-        else:
-            stmt_u = select(User.id).where(or_(User.id.in_(st_sub), User.id.in_(fac_sub)), User.is_active == True)
-
-        recipient_user_ids.update((await db.exec(stmt_u)).all())
-
-    elif payload.scope_type == NotificationScope.BATCH:
-        batch_id = payload.scope_id
-        if not batch_id:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Batch ID is required.")
-        
-        stmt_u = (
-            select(StudentProfile.user_id)
-            .join(User, StudentProfile.user_id == User.id)
-            .where(StudentProfile.batch_id == batch_id, User.is_active == True)
-        )
-        recipient_user_ids.update((await db.exec(stmt_u)).all())
-
-    elif payload.scope_type == NotificationScope.SECTION:
-        sec_id = payload.scope_id
-        if not sec_id:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Section ID is required.")
-        
-        stmt_u = (
-            select(StudentSubjectMap.student_id)
-            .join(CourseOffering, StudentSubjectMap.course_offering_id == CourseOffering.id)
-            .where(CourseOffering.section_id == sec_id)
-        )
-        recipient_user_ids.update((await db.exec(stmt_u)).all())
-
-    elif payload.scope_type == NotificationScope.INDIVIDUAL:
-        if not payload.scope_id:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Recipient User ID is required.")
-        recipient_user_ids.add(payload.scope_id)
-
-    else:
-        # Fallback to active users
-        user_stmt = select(User.id).where(User.is_active == True)
-        recipient_user_ids.update((await db.exec(user_stmt)).all())
-
-    # Exclude sender from recipients if present
-    recipient_user_ids.discard(current_user.id)
-
-    # 5. Persist Notification record
+    # 5. Persist Notification record with PENDING state
     notification = Notification(
         sender_id=current_user.id,
         title=payload.title.strip(),
@@ -292,6 +403,8 @@ async def send_broadcast(
         target_role=target_role_filter,
         action_url=payload.action_url,
         expires_at=payload.expires_at,
+        status=NotificationDeliveryStatus.PENDING,
+        processed_count=0,
         created_at=datetime.utcnow(),
     )
     db.add(notification)
@@ -299,7 +412,6 @@ async def send_broadcast(
     await db.refresh(notification)
 
     # 6. Schedule Decoupled Background Worker for Non-blocking Fan-Out & Push Delivery
-    recipient_list = list(recipient_user_ids)
     if recipient_list:
         background_tasks.add_task(
             dispatch_notification_fanout,
@@ -311,6 +423,10 @@ async def send_broadcast(
             notification_type=notification.notification_type.value,
             action_url=notification.action_url
         )
+    else:
+        notification.status = NotificationDeliveryStatus.COMPLETED
+        db.add(notification)
+        await db.commit()
 
     return NotificationBroadcastResponse(
         id=notification.id,
@@ -326,10 +442,10 @@ async def send_broadcast(
         target_role=notification.target_role,
         action_url=notification.action_url,
         created_at=notification.created_at,
-        recipient_count=len(recipient_list)
+        recipient_count=len(recipient_list),
+        status=notification.status.value,
+        failure_reason=notification.failure_reason
     )
-
-
 # ---------------------------------------------------------------------------
 # 2. INBOX & NOTIFICATIONS FOR AUTHENTICATED USER (Bell / History)
 # ---------------------------------------------------------------------------
@@ -513,7 +629,10 @@ async def get_broadcast_history(
             "target_role": notif.target_role,
             "action_url": notif.action_url,
             "created_at": notif.created_at.isoformat(),
-            "recipient_count": rec_ct
+            "recipient_count": rec_ct,
+            "status": notif.status.value if hasattr(notif.status, "value") else str(notif.status),
+            "failure_reason": notif.failure_reason,
+            "processed_count": notif.processed_count
         })
 
     return {

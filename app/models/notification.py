@@ -1,5 +1,6 @@
 # app/models/notification.py
 from sqlmodel import SQLModel, Field
+from sqlalchemy import UniqueConstraint
 from typing import Optional
 from enum import Enum
 from datetime import datetime
@@ -20,6 +21,13 @@ class NotificationPriority(str, Enum):
     HIGH = "HIGH"
     URGENT = "URGENT"
 
+
+
+class NotificationDeliveryStatus(str, Enum):
+    PENDING = "PENDING"
+    PROCESSING = "PROCESSING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
 
 class NotificationScope(str, Enum):
     UNIVERSITY = "UNIVERSITY"
@@ -42,11 +50,17 @@ class Notification(SQLModel, table=True):
     scope_id: Optional[int] = Field(default=None)
     target_role: Optional[str] = Field(default="ALL")  # "ALL", "STUDENT", "TEACHER", "COORDINATOR", etc.
     action_url: Optional[str] = Field(default=None)
+    status: NotificationDeliveryStatus = Field(default=NotificationDeliveryStatus.PENDING, index=True)
+    failure_reason: Optional[str] = Field(default=None)
+    processed_count: int = Field(default=0)
     created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
     expires_at: Optional[datetime] = Field(default=None)
 
 
 class NotificationRecipient(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("notification_id", "user_id", name="uq_notification_recipient"),
+    )
     id: Optional[int] = Field(default=None, primary_key=True)
     notification_id: int = Field(foreign_key="notification.id", index=True)
     user_id: int = Field(foreign_key="user.id", index=True)

@@ -30,6 +30,13 @@ async def lifespan(app: FastAPI):
         await init_admin()
     except Exception as e:
         print(f"Admin initialization skipped/failed: {e}")
+
+    # Self-healing crash recovery for notifications interrupted mid-delivery
+    try:
+        from app.api.v1.notifications import recover_interrupted_notifications
+        await recover_interrupted_notifications()
+    except Exception as e:
+        print(f"[RECOVERY] Notification recovery scan skipped/failed: {e}")
     
     yield 
 

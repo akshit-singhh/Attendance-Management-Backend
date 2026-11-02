@@ -32,6 +32,8 @@ class NotificationBroadcastResponse(BaseModel):
     action_url: Optional[str] = None
     created_at: datetime
     recipient_count: int
+    status: str = "PENDING"
+    failure_reason: Optional[str] = None
 
 
 class NotificationRecipientItem(BaseModel):

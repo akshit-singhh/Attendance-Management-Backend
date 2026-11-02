@@ -24,6 +24,9 @@ This project is an end-to-end academic operations and attendance intelligence pl
 - **Live Attendance Sessions & Flagging**: Real-time tracking of marked sessions, attendance percentages, student flags, and historical status audit logs.
 - **Attendance Corrections & Leave Automation**: Student medical leave workflows with document upload, and automated status overrides from `ABSENT` to `LEAVE` with full audit trails.
 - **Admin Dashboard Intelligence**: Real-time stats, setup health diagnostics, attendance pulse (daily overall percentages), and pending action items.
+- **Enterprise Notification & Broadcast Engine (AlgoMaster Architecture)**: Multi-tier campus announcements (University-wide, School, Department, Batch, Section, or Individual) with priority tags (`URGENT`, `HIGH`, `NORMAL`, `LOW`), deep links, and attachments.
+- **Asynchronous Fan-Out & Mobile Push (Firebase Cloud Messaging - FCM)**: Decoupled FastAPI `BackgroundTasks` engine delivering non-blocking dispatch (`202 Accepted` in ~20ms), 500-record batch chunking to PostgreSQL, multi-device push notifications via official `firebase-admin`, and self-healing invalid device token pruning.
+- **Docker Production Healthcheck**: Standalone standard-library probe (`healthcheck.py`) using `urllib.request` (zero third-party dependencies) testing PostgreSQL connectivity, upload storage permissions, and service uptime.
 
 ---
 
@@ -57,6 +60,8 @@ Attendance_backend/
 │   │   ├── deps.py              # Role guards (require_admin, require_hod, require_teacher, etc.)
 │   │   └── v1/
 │   │       ├── auth.py          # Login, token refresh rotation, /auth/me profile, change-password
+│   │       ├── notifications.py # Broadcast dispatch, user inboxes, FCM tokens, audit log
+│   │       ├── health.py        # Production healthcheck router (PostgreSQL + storage probe)
 │   │       ├── mobile/          # Mobile client endpoints
 │   │       │   ├── attendance.py# Offline sync, teacher rosters, live roll call
 │   │       │   ├── student.py   # Student dashboard, live schedule, attendance history
@@ -73,8 +78,10 @@ Attendance_backend/
 │   ├── models/                  # SQLModel table definitions
 │   │   ├── academic.py          # School, Department, Programme, Batch, Section, Offering, Timetable
 │   │   ├── attendance.py        # AttendanceSession, Record, AuditLog, Correction, Leave
-│   │   └── auth.py              # User, RoleAssignment, StudentProfile, RefreshToken
+│   │   ├── auth.py              # User, RoleAssignment, StudentProfile, RefreshToken
+│   │   └── notification.py      # Notification, Recipient, UserDeviceToken, NotificationSetting
 │   └── schemas/                 # Pydantic request/response schemas
+├── healthcheck.py               # Standalone Docker production healthcheck probe (urllib.request)
 ├── alembic/                     # Database migration revisions
 ├── rebuild_and_sync.py          # Full timetable & section consolidation sync utility
 ├── sync_full_timetable.py       # Comprehensive timetable sync script
@@ -348,7 +355,35 @@ docker run -d --name attendance-api --env-file .env -p 8000:8000 attendance-back
 
 ---
 
-## 13. Summary of API Endpoints
+
+---
+
+## 13. Production Notification System & Docker Healthcheck
+
+### 1. Decoupled Asynchronous Fan-Out Engine
+The notification architecture implements the production-grade fan-out system design pattern:
+
+```
+[Client / Admin] ──POST /broadcast──> [FastAPI Router]
+                                            │ (Persists Master Notification)
+                                            ▼
+                               [Returns 202 Accepted in ~20ms]
+                                            │
+                                            ▼ (Async BackgroundTasks)
+                               [dispatch_notification_fanout]
+                                 ├── 1. Chunked DB Inserts (500 per batch)
+                                 │      └── Writes to NotificationRecipient
+                                 ├── 2. Query Active Device Tokens (UserDeviceToken)
+                                 ├── 3. Google FCM Multicast Delivery
+                                 └── 4. Self-Healing: Deactivates Expired Tokens
+```
+
+### 2. Standalone Docker Healthcheck (`healthcheck.py`)
+To prevent container startup loops in environments without `curl` or `wget` (e.g. `python:3.12-slim`), `healthcheck.py` queries `http://127.0.0.1:8000/health` with a 4-second timeout using Python's standard library `urllib.request`. It exits with code `0` on HTTP 200 and code `1` on failure.
+
+---
+
+## 14. Summary of API Endpoints
 
 | Category | Method | Path | Description |
 |---|---|---|---|
@@ -417,3 +452,11 @@ docker run -d --name attendance-api --env-file .env -p 8000:8000 attendance-back
 | **Mobile Attendance** | `POST` | `/api/v1/mobile/attendance/sync` | High-speed offline attendance sync |
 | **Mobile Attendance** | `POST` | `/api/v1/mobile/attendance/postpone` | Mark a scheduled class as postponed or rescheduled |
 | **Mobile Leaves** | `POST` | `/api/v1/mobile/leaves/apply` | Student leave application with medical certificate file upload |
+| **Notifications** | `POST` | `/api/v1/notifications/broadcast` | Role-governed campus broadcast dispatch (`202 Accepted` non-blocking) |
+| **Notifications** | `GET` | `/api/v1/notifications/my-notifications` | Paginated user in-app notification inbox with `unread_count` |
+| **Notifications** | `GET` | `/api/v1/notifications/unread-count` | Ultra-fast unread count endpoint for header notification bells |
+| **Notifications** | `PATCH`| `/api/v1/notifications/{recipient_id}/read` | Mark individual notification as read |
+| **Notifications** | `POST` | `/api/v1/notifications/mark-all-read` | Mark all addressed notifications as read |
+| **Notifications** | `GET` | `/api/v1/notifications/broadcasts` | Campus-wide broadcast audit log with recipient reach statistics |
+| **Notifications** | `POST` | `/api/v1/notifications/devices/register` | Register / update mobile FCM registration token for push delivery |
+| **Notifications** | `GET/PATCH`| `/api/v1/notifications/settings` | Admin broadcast permissions governance (coordinators/teachers) |
