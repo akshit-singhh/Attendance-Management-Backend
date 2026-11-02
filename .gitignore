@@ -64,3 +64,6 @@ data/*
 run_mailpit.py
 seed_class.py
 fix_roles.py
+# Firebase Credentials
+serviceAccountKey.json
+*.json.json

@@ -106,6 +106,17 @@ from app.schemas.health import (
     HealthCheckResponse,
 )
 
+from app.schemas.notification import (
+    NotificationCreate,
+    NotificationBroadcastResponse,
+    NotificationRecipientItem,
+    PaginatedNotificationsResponse,
+    UnreadCountResponse,
+    DeviceTokenRegisterRequest,
+    NotificationSettingsResponse,
+    NotificationSettingsUpdate,
+)
+
 __all__ = [
     # Auth
     "LoginRequest",
@@ -193,4 +204,13 @@ __all__ = [
     "StorageCheck",
     "AppMetadata",
     "HealthCheckResponse",
+    # Notifications
+    "NotificationCreate",
+    "NotificationBroadcastResponse",
+    "NotificationRecipientItem",
+    "PaginatedNotificationsResponse",
+    "UnreadCountResponse",
+    "DeviceTokenRegisterRequest",
+    "NotificationSettingsResponse",
+    "NotificationSettingsUpdate",
 ]

@@ -26,6 +26,9 @@ from app.models.attendance import (
     AttendanceSession, AttendanceRecord, AttendanceAuditLog, CorrectionRequest
 )
 from app.models.leaves import MedicalLeave
+from app.models.notification import (
+    Notification, NotificationRecipient, UserDeviceToken, NotificationSetting
+)
 
 # this is the Alembic Config object
 config = context.config

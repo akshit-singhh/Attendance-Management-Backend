@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
-from app.api.v1 import auth, health
+from app.api.v1 import auth, health, notifications
 from app.api.v1.mobile import attendance as mobile_attendance
 from app.api.v1.mobile import student as mobile_student
 from app.api.v1.web import management as web_management
@@ -58,6 +58,14 @@ app.mount("/static/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 # Health Endpoint
 app.include_router(health.router, prefix="/health", tags=["Health"])
+
+# Notification & Communications Router
+app.include_router(
+    notifications.router,
+    prefix=f"{settings.API_V1_STR}/notifications",
+    tags=["Notifications"]
+)
+
 
 app.include_router(
     auth.router, 

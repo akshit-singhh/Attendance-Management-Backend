@@ -1,3 +1,4 @@
+from typing import Optional
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
@@ -24,10 +25,12 @@ class Settings(BaseSettings):
     MYGBU_SCHEDULE_URL: str
 
     # Push Notification Settings
-    NOTIFICATION_PROVIDER: str = "ntfy"
-    NTFY_SERVER_URL: str = "http://192.168.1.7:8095"
+    NOTIFICATION_PROVIDER: str = "fcm"
+    FIREBASE_CREDENTIALS_PATH: Optional[str] = None
+    FCM_SERVER_KEY: Optional[str] = None
 
     class Config:
         env_file = ".env"
+        extra = "ignore"
 
 settings = Settings()
