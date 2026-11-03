@@ -8,6 +8,7 @@ from sqlalchemy import text
 
 from app.core.config import settings
 from app.core.database import engine
+from app.services.notification_service import notification_service
 from app.schemas.health import (
     DatabaseCheck,
     StorageCheck,
@@ -93,6 +94,7 @@ async def health_check(response: Response):
 
     return HealthCheckResponse(
         status=overall_status,
+        fcm_configured=notification_service.is_configured,
         app=AppMetadata(
             name=settings.PROJECT_NAME,
             version=settings.VERSION,

@@ -1,4 +1,6 @@
 import os
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,11 +34,15 @@ async def lifespan(app: FastAPI):
         print(f"Admin initialization skipped/failed: {e}")
 
     # Self-healing crash recovery for notifications interrupted mid-delivery
-    try:
-        from app.api.v1.notifications import recover_interrupted_notifications
-        await recover_interrupted_notifications()
-    except Exception as e:
-        print(f"[RECOVERY] Notification recovery scan skipped/failed: {e}")
+    async def _safe_recovery():
+        try:
+            from app.api.v1.notifications import recover_interrupted_notifications
+            await recover_interrupted_notifications()
+        except Exception as e:
+            logging.getLogger("attendance.notifications").exception(f"[RECOVERY] Notification recovery scan failed: {e}")
+
+    _recovery_task = asyncio.create_task(_safe_recovery())
+    app.state.recovery_task = _recovery_task
     
     yield 
 
@@ -47,10 +53,21 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS configuration - strict in production, open for local dev
+# CORS configuration - read allowed origins from ALLOWED_ORIGINS env var (comma-separated), default to localhost for dev
+allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "")
+if allowed_origins_env.strip():
+    allowed_origins = [orig.strip() for orig in allowed_origins_env.split(",") if orig.strip()]
+else:
+    allowed_origins = [
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], 
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

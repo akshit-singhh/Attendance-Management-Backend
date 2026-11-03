@@ -29,5 +29,6 @@ class AppMetadata(BaseModel):
 
 class HealthCheckResponse(BaseModel):
     status: str
+    fcm_configured: bool = False
     app: AppMetadata
     checks: Dict[str, Any]

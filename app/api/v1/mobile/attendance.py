@@ -1,5 +1,5 @@
+import logging
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
-from app.services.notification_service import notification_service
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlmodel import select
 from typing import List, Optional
@@ -28,6 +28,9 @@ from app.schemas.attendance import (
     PostponeClassRequest,
 )
 from app.schemas.corrections import CorrectionRequestCreate
+from app.api.v1.notifications import notify_users
+
+logger = logging.getLogger("attendance.notifications")
 
 router = APIRouter()
 
@@ -401,43 +404,33 @@ async def sync_offline_attendance(
     db.add_all(db_records)
     await db.commit()
 
-    # Dispatch student push notifications in background
+    # Dispatch student push notifications in background for ABSENT / LEAVE
     try:
         subject = await db.get(Subject, offering.subject_id)
         subject_name = subject.name if subject else "Class"
         subject_code = subject.course_code if subject else ""
         date_str = payload.date.strftime("%d %b %Y")
 
-        student_ids = [item.student_id for item in payload.records]
-        if student_ids:
-            student_query = (
-                select(StudentProfile.user_id, StudentProfile.roll_number, User.full_name)
-                .join(User, StudentProfile.user_id == User.id)
-                .where(StudentProfile.user_id.in_(student_ids))
-            )
-            student_rows = (await db.exec(student_query)).all()
-            student_info_map = {row[0]: {"roll": row[1], "name": row[2]} for row in student_rows}
-
-            alerts = []
-            for item in payload.records:
-                info = student_info_map.get(item.student_id)
-                if info and info.get("roll"):
-                    alerts.append({
-                        "roll_number": info["roll"],
-                        "student_name": info["name"],
-                        "subject_name": subject_name,
-                        "subject_code": subject_code,
-                        "status": item.status,
-                        "date_str": date_str,
-                    })
-
-            if alerts:
-                background_tasks.add_task(
-                    notification_service.batch_send_attendance_alerts,
-                    alerts
+        for item in payload.records:
+            st = item.status.value.upper() if hasattr(item.status, "value") else str(item.status).upper()
+            if "ABSENT" in st or st in ("ABSENT", "A") or "LEAVE" in st or st in ("LEAVE", "L"):
+                is_absent = "ABSENT" in st or st in ("ABSENT", "A")
+                status_label = "Absent" if is_absent else "on Leave"
+                title = f"Attendance: {status_label} ({subject_code})" if subject_code else f"Attendance: {status_label}"
+                message = f"You were marked {status_label} for {subject_name} on {date_str}."
+                await notify_users(
+                    db=db,
+                    background_tasks=background_tasks,
+                    sender_id=teacher_id,
+                    user_ids=[item.student_id],
+                    title=title,
+                    message=message,
+                    notification_type="ATTENDANCE_ALERT",
+                    priority="HIGH" if is_absent else "NORMAL",
+                    section_id=offering.section_id
                 )
     except Exception as exc:
-        pass
+        logger.exception("Failed to dispatch attendance notification")
 
     return {
         "status": "success",
@@ -607,32 +600,27 @@ async def postpone_class(
         date_str = payload.date.strftime("%d %b %Y")
 
         student_query = (
-            select(StudentProfile.roll_number, User.full_name)
-            .join(User, StudentProfile.user_id == User.id)
-            .join(StudentSubjectMap, User.id == StudentSubjectMap.student_id)
+            select(StudentSubjectMap.student_id)
             .where(StudentSubjectMap.course_offering_id == payload.course_offering_id)
         )
-        student_rows = (await db.exec(student_query)).all()
+        enrolled_student_ids = (await db.exec(student_query)).all()
 
-        alerts = [
-            {
-                "roll_number": row[0],
-                "student_name": row[1],
-                "subject_name": subject_name,
-                "subject_code": subject_code,
-                "date_str": date_str,
-                "reason": reason
-            }
-            for row in student_rows if row[0]
-        ]
-
-        if alerts:
-            background_tasks.add_task(
-                notification_service.batch_send_class_postponed_alerts,
-                alerts
+        if enrolled_student_ids:
+            title = f"Class Postponed: {subject_code}" if subject_code else "Class Postponed"
+            message = f"Your {subject_name} class on {date_str} has been postponed. Reason: {reason}."
+            await notify_users(
+                db=db,
+                background_tasks=background_tasks,
+                sender_id=teacher_id,
+                user_ids=list(enrolled_student_ids),
+                title=title,
+                message=message,
+                notification_type="SYSTEM",
+                priority="NORMAL",
+                section_id=offering.section_id
             )
     except Exception as exc:
-        pass
+        logger.exception("Failed to dispatch postponement notification")
 
     return {
         "status": "success",

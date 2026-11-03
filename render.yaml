@@ -3,9 +3,11 @@ services:
     name: attendance-backend
     runtime: docker
     plan: free
-    healthCheckPath: /
+    healthCheckPath: /health
     envVars:
       - key: DATABASE_URL
+        sync: false
+      - key: FIREBASE_CREDENTIALS_JSON
         sync: false
       - key: SECRET_KEY
         generateValue: true
