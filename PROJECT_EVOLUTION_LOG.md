@@ -150,10 +150,24 @@
 | **Crash Resilience & Sweeper**| Outbox state machine + Non-blocking Lifespan sweeper | Displays delivery status badges | Safe idempotent display | 🟢 Fully Active |
 | **Student Timetable & Leaves**| Timetable, Leave balance & requests | Approvals & Allocations | Compose Timetable & Leave Screens | 🟢 Fully Active |
 | **Timetable PDF & Print** | N/A | Single-Page Landscape Vector PDF & Print (`zoom: 0.86` fit) | N/A | 🟢 Fully Active |
+| **Tab Back Navigation & Stack** | N/A | React Router history | Compose BackHandler & Tab History Stack | 🟢 Fully Active |
 
 ---
 
 ## 3. Chronological Chat & Development Activity Trail
+
+### Session: 2026-11-06 20:00:00 IST — Student App Back-Navigation Stack & Top Bar Back Button Removal
+* **Scope:** Mobile Client (`AttendanceApp/app`)
+* **Features Added & Fixed:**
+  1. *Top App Bar Back Button Removed on Student Tabs:* Removed redundant top back arrow (`navigationIcon`) from `StudentCalendarScreen.kt` and `AttendancePlannerScreen.kt`. Made `onNavigateBack` parameter optional (`(() -> Unit)? = null`) and conditionally omitted the icon when used within bottom navigation pager tabs.
+  2. *Predictable Back-Navigation Stack across Tabs:* Fixed issue where pressing system Back button inside student tabs (Calendar, Planner, Subjects, Timetable) immediately closed and exited the app. Implemented `BackHandler` inside `StudentMainPagerScreen.kt` backed by a reactive `pageHistory` stack (`mutableStateListOf<Int>()`). When pressing Back on any sub-tab, the app now smoothly returns to the previously visited screen/tab in sequence, finally returning to the Home Dashboard (`page 0`) before exiting.
+* **Bugs & Regressions Resolved:**
+  1. *Sudden App Termination on Back Press:* When moving between bottom navigation tabs (e.g. Dashboard -> Calendar -> Planner), pressing the system Back button bypassed the tab history and popped the root Compose destination, causing the Android Activity to finish. Resolved via `BackHandler(enabled = pagerState.currentPage != 0 || pageHistory.isNotEmpty())`.
+  2. *Awkward Top Navigation Icon on Root Tabs:* Attendance Calendar and Planner showed a top back arrow even though they are root bottom navigation destinations.
+* **Verification & Testing Conducted:**
+  - Gradle compilation: `.\gradlew.bat compileDebugKotlin --no-daemon` $\rightarrow$ **BUILD SUCCESSFUL in 25s**.
+
+---
 
 ### Session: 2026-11-04 03:05:00 IST — Android Client Push Integration & Timetable Dense Layout Verification
 * **Scope:** Android Client (`AttendanceApp/app`), Web Frontend (`Attendance_frontend/minor-project`)
