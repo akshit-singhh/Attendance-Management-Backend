@@ -156,6 +156,17 @@
 
 ## 3. Chronological Chat & Development Activity Trail
 
+### Session: 2026-11-07 23:20:00 IST — Fix AttributeError on Notification Model String Attributes in `/my-notifications`
+* **Scope:** Backend API (`Attendance_backend`)
+* **Bugs & Regressions Resolved:**
+  1. *HTTP 500 on `GET /api/v1/notifications/my-notifications`:* When retrieving user notifications, `NotificationRecipientItem` accessed `notif.notification_type.value` and `notif.priority.value`. Since `notification_type`, `priority`, and `scope_type` were converted to plain `str` in the database model to prevent Postgres `$1::notificationtype` binding errors, accessing `.value` threw `AttributeError: 'str' object has no attribute 'value'`.
+  2. *Defensive Attribute Value Extraction Helper:* Implemented helper `_val(x)` in `app/api/v1/notifications.py` (`x.value if hasattr(x, "value") else str(x)`) and applied across `get_my_notifications`, `send_broadcast`, and `notify_users`, ensuring both raw string DB columns and Pydantic schema enums serialize cleanly.
+* **Verification & Testing Conducted:**
+  - Added regression test `test_my_notifications_string_attributes` in `tests/test_notifications.py` verifying string values for `notification_type`, `priority`, and `title` return HTTP 200 with complete payload.
+  - Test suite result: `pytest tests/test_notifications.py` $\rightarrow$ **4 passed in 2.48s**.
+
+---
+
 ### Session: 2026-11-06 20:00:00 IST — Student App Back-Navigation Stack & Top Bar Back Button Removal
 * **Scope:** Mobile Client (`AttendanceApp/app`)
 * **Features Added & Fixed:**

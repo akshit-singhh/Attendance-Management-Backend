@@ -258,3 +258,52 @@ async def test_health_and_device_unregister():
             assert student.fcm_token is None
         finally:
             app.dependency_overrides.clear()
+
+
+@pytest.mark.anyio
+async def test_my_notifications_string_attributes():
+    user = User(id=42, email="student@test.com", full_name="Student Test", is_active=True)
+    sender = User(id=1, email="admin@test.com", full_name="Admin Test", is_active=True)
+    notif = Notification(
+        id=10,
+        sender_id=1,
+        title="Test Notification",
+        message="Hello World",
+        notification_type="ATTENDANCE_ALERT",
+        priority="HIGH",
+        scope_type="INDIVIDUAL",
+        scope_id=42
+    )
+    recip = NotificationRecipient(
+        id=100,
+        notification_id=10,
+        user_id=42,
+        is_read=False
+    )
+
+    mock_db = AsyncMock()
+    async def mock_exec(stmt):
+        m = MagicMock()
+        m.one.return_value = 1
+        m.all.return_value = [(recip, notif, sender)]
+        return m
+
+    mock_db.exec.side_effect = mock_exec
+
+    app.dependency_overrides[get_current_user] = lambda: user
+    app.dependency_overrides[get_session] = lambda: mock_db
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            res = await client.get("/api/v1/notifications/my-notifications?page=1&size=50&unread_only=false")
+            assert res.status_code == 200, f"Expected 200, got {res.status_code}: {res.text}"
+            data = res.json()
+            assert data["total"] == 1
+            assert len(data["items"]) == 1
+            item = data["items"][0]
+            assert item["notification_type"] == "ATTENDANCE_ALERT"
+            assert item["priority"] == "HIGH"
+            assert item["title"] == "Test Notification"
+    finally:
+        app.dependency_overrides.clear()
+

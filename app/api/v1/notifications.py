@@ -38,6 +38,12 @@ from app.schemas.notification import (
 router = APIRouter()
 
 
+def _val(x):
+    if x is None:
+        return None
+    return x.value if hasattr(x, "value") else str(x)
+
+
 async def get_or_create_setting(db: AsyncSession, key: str, default_val: str, description: str = "") -> str:
     stmt = select(NotificationSetting).where(NotificationSetting.key == key)
     res = (await db.exec(stmt)).first()
@@ -316,8 +322,8 @@ async def recover_interrupted_notifications():
                     recipient_user_ids=recipients,
                     title=notif.title,
                     message=notif.message,
-                    priority=notif.priority.value if hasattr(notif.priority, "value") else str(notif.priority),
-                    notification_type=notif.notification_type.value if hasattr(notif.notification_type, "value") else str(notif.notification_type),
+                    priority=_val(notif.priority),
+                    notification_type=_val(notif.notification_type),
                     action_url=notif.action_url,
                     skip_push=skip_push
                 )
@@ -353,9 +359,9 @@ async def notify_users(
         s_type = NotificationScope.SECTION
         s_id = section_id
 
-    notif_type_val = notification_type.value if hasattr(notification_type, "value") else str(notification_type)
-    priority_val = priority.value if hasattr(priority, "value") else str(priority)
-    scope_type_val = s_type.value if hasattr(s_type, "value") else str(s_type)
+    notif_type_val = _val(notification_type)
+    priority_val = _val(priority)
+    scope_type_val = _val(s_type)
 
     notification = Notification(
         sender_id=sender_id,
@@ -631,7 +637,7 @@ async def send_broadcast(
         if not payload.scope_id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"{payload.scope_type.value.capitalize()} ID is required."
+                detail=f"{_val(payload.scope_type).capitalize()} ID is required."
             )
         if not is_admin:
             owns = await sender_owns_scope(db, assignments, payload.scope_type, payload.scope_id)
@@ -678,8 +684,8 @@ async def send_broadcast(
             recipient_user_ids=recipient_list,
             title=notification.title,
             message=notification.message,
-            priority=notification.priority.value,
-            notification_type=notification.notification_type.value,
+            priority=_val(notification.priority),
+            notification_type=_val(notification.notification_type),
             action_url=notification.action_url
         )
     else:
@@ -694,15 +700,15 @@ async def send_broadcast(
         sender_email=current_user.email,
         title=notification.title,
         message=notification.message,
-        notification_type=notification.notification_type.value,
-        priority=notification.priority.value,
-        scope_type=notification.scope_type.value,
+        notification_type=_val(notification.notification_type),
+        priority=_val(notification.priority),
+        scope_type=_val(notification.scope_type),
         scope_id=notification.scope_id,
         target_role=notification.target_role,
         action_url=notification.action_url,
         created_at=notification.created_at,
         recipient_count=len(recipient_list),
-        status=notification.status.value,
+        status=_val(notification.status),
         failure_reason=notification.failure_reason
     )
 # ---------------------------------------------------------------------------
@@ -769,8 +775,8 @@ async def get_my_notifications(
             notification_id=notif.id,
             title=notif.title,
             message=notif.message,
-            notification_type=notif.notification_type.value,
-            priority=notif.priority.value,
+            notification_type=_val(notif.notification_type),
+            priority=_val(notif.priority),
             sender_name=sender.full_name,
             action_url=notif.action_url,
             is_read=recipient.is_read,
@@ -894,10 +900,10 @@ async def get_broadcast_history(
 
     items = []
     for notif, sender in rows:
-        notif_type = notif.notification_type.value if hasattr(notif.notification_type, "value") else str(notif.notification_type)
-        notif_priority = notif.priority.value if hasattr(notif.priority, "value") else str(notif.priority)
-        notif_scope = notif.scope_type.value if hasattr(notif.scope_type, "value") else str(notif.scope_type)
-        notif_status = notif.status.value if hasattr(notif.status, "value") else str(notif.status)
+        notif_type = _val(notif.notification_type)
+        notif_priority = _val(notif.priority)
+        notif_scope = _val(notif.scope_type)
+        notif_status = _val(notif.status)
 
         items.append({
             "id": notif.id,
