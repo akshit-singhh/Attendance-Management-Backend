@@ -134,11 +134,29 @@
 
 ---
 
+### ADR-008: Native Self-Service Forgot Password & OTP Reset Architecture on Mobile
+* **Date & Time:** 2026-11-08 23:30:00 IST
+* **Status:** ✅ Accepted & Implemented
+* **Context:**
+  Users forgetting passwords on the mobile app previously had no in-app self-service recovery, requiring manual administrator database intervention and leaving an unhandled TODO in `LoginScreen.kt`.
+* **Decision Taken:**
+  - Implemented `ForgotPasswordScreen` with a clean 2-step state machine:
+    1. *Step 1 (OTP Request):* Accepts registered institutional email or student roll number, dispatches to `POST /api/v1/auth/forgot-password`.
+    2. *Step 2 (Verification & Reset):* Accepts 6-digit verification code, new password ($\ge 8$ chars) with visibility toggles, and confirmation password, submitting to `POST /api/v1/auth/reset-password`.
+    3. *Success Confirmation:* Displays explicit success state with a 1-click return to login.
+  - Added `ForgotPasswordUiState` to `AuthViewModel.kt`, keeping auth session flow unpolluted.
+  - Added `Routes.FORGOT_PASSWORD` to Android `NavGraph.kt` with full `BackHandler` step-back navigation.
+* **Consequences & Impact:**
+  - Complete mobile self-service recovery for both students and faculty.
+  - Zero external administrative intervention required for lost credentials.
+
+---
+
 ## 2. Cross-Platform Feature Matrix
 
 | Capability / Feature | Backend (`Attendance_backend`) | Web Dashboard (`Attendance_frontend`) | Android App (`AttendanceApp`) | Architecture Status |
 | :--- | :--- | :--- | :--- | :--- |
-| **Authentication & RBAC** | JWT OAuth2, Scoped Role Assignments | Multi-role Login, Role Guard routes | TokenManager, Secure Prefs | 🟢 Fully Active |
+| **Authentication & RBAC** | JWT OAuth2, Scoped Role Assignments | Multi-role Login, Role Guard routes | TokenManager, Secure Prefs, OTP Password Reset | 🟢 Fully Active |
 | **Push Delivery Engine** | Firebase Admin SDK (`firebase-admin`) | Admin Broadcast Trigger UI | `AttendanceFirebaseMessagingService` | 🟢 Fully Active |
 | **Legacy `ntfy` PubSub** | Completely Removed | Deprecated | Completely Removed | 🔴 Decommissioned |
 | **Device Token Registration**| `POST /notifications/devices/register` | N/A | Auto-sync on startup & login | 🟢 Fully Active |
@@ -155,6 +173,34 @@
 ---
 
 ## 3. Chronological Chat & Development Activity Trail
+
+### Session: 2026-11-08 23:42:00 IST — Timetable 1-Page Guaranteed Landscape Print, Combined Class Cell Merging & Action Button Fix
+* **Scope:** Web Frontend (`Attendance_frontend/minor-project`)
+* **Features Added & Hardened:**
+  1. *Guaranteed 1-Page Landscape Print (`src/index.css`):* Declared top-level `@page { size: A4 landscape; margin: 3mm 4mm 3mm 4mm; }` outside `@media print`. Because CSS Paged Media Module specifies that `@page` cannot be nested inside `@media`, Chromium previously ignored the rule and reverted to Portrait orientation (splitting output into 2 sheets). Added top-level declaration, adjusted `#timetable-print-area` print scaling to `zoom: 0.80`, and added `break-after: avoid !important`. Both Section view (CS-IV-A with Non-classroom courses + Remarks) and Faculty view now fit on **1 single sheet of paper**.
+  2. *Intelligent Merged / Combined Lecture Grouping (`UniversityTimetableTab.tsx`):* For faculty teaching combined branch classes simultaneously in the same lecture hall (e.g., Rashmi Singh teaching `CC303`, `CD303`, `CM303` in `IL202` on Wed/Thu/Fri for `CSE-CS-III`, `CSE-DS-III`, and `CSE-ML-III`), implemented `groupCellSlots()`. Instead of stacking 3 redundant full cards and tripling the row height, the matrix now consolidates them into a single clean card showing `CC303 / CD303 / CM303` with a distinct `Combined` badge and compact section tags (`CS-III, DS-III, ML-III`), keeping row heights uniform and compact.
+  3. *Print / Export Action Button Consolidation:* Replaced confusing/redundant separate buttons with a unified, high-contrast `Print / Export PDF` action button (`bg-blue-700 text-white`) in the top action bar, functional across both Section view and Faculty view.
+* **Bugs & Regressions Resolved:**
+  1. *Timetable Printing Across 2 Sheets:* Resolved by moving `@page` to the top-level CSS block and applying `zoom: 0.80` with tight print table paddings (`print:p-0.5`).
+  2. *Excessive Row Height & Table Distortion for Merged Faculty Slots:* Solved via `groupCellSlots()` grouping multi-section slots sharing identical rooms and periods into single compact entries.
+  3. *TypeScript Type Error in `EnrollmentsTab.tsx`:* Fixed `u.filter(...)` to `(u?.items ?? []).filter(...)` matching the `PaginatedUsers` schema.
+* **Verification & Testing Conducted:**
+  - Production build: `npm run build` $ightarrow$ **✓ 3072 modules transformed, built in 1.82s with zero errors**.
+  - Verified Kotlin compilation for Android: `compileDebugKotlin` $ightarrow$ **BUILD SUCCESSFUL**.
+
+---
+
+### Session: 2026-11-08 23:30:00 IST — Mobile Forgot Password & OTP Password Reset Flow
+* **Scope:** Mobile Client (`AttendanceApp/app`), Authentication Architecture
+* **Features Added:**
+  1. *Mobile Forgot Password UI (`ForgotPasswordScreen.kt`):* Built a dedicated two-step self-service recovery screen supporting both university email and student roll number identification.
+  2. *OTP Verification & Password Reset Flow:* Integrated 6-digit numeric verification input, password visibility toggles (`Icons.Default.Visibility`/`VisibilityOff`), client-side validation ($\ge 8$ characters, matching passwords), resend OTP action, and success confirmation screen.
+  3. *State Management (`AuthViewModel.kt`):* Added `ForgotPasswordUiState` (`Idle`, `Loading`, `OtpSent`, `ResetSuccess`, `Error`), `sendForgotPasswordOtp()`, `submitResetPassword()`, and `resetForgotPasswordState()`.
+  4. *Navigation & Routing (`NavGraph.kt`, `Routes.kt`, `LoginScreen.kt`):* Registered `Routes.FORGOT_PASSWORD`, wired "Forgot password?" link on `LoginScreen.kt`, and configured `BackHandler` so pressing Back on the OTP step returns to the identifier step before exiting to login.
+* **Verification & Testing Conducted:**
+  - Verified Kotlin compilation via Gradle: `.\gradlew.bat compileDebugKotlin --no-daemon` $\rightarrow$ **BUILD SUCCESSFUL in 1m 29s**.
+
+---
 
 ### Session: 2026-11-07 23:20:00 IST — Fix AttributeError on Notification Model String Attributes in `/my-notifications`
 * **Scope:** Backend API (`Attendance_backend`)
