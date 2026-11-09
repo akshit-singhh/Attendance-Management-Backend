@@ -174,6 +174,19 @@
 
 ## 3. Chronological Chat & Development Activity Trail
 
+### Session: 2026-11-09 22:46:49 IST — Mobile App: Teacher In-App Notification Inbox & Real-Time Badge Integration
+* **Scope:** Mobile Client (`AttendanceApp/app`)
+* **Features Added:**
+  1. *Teacher Notification Inbox (`TeacherNotificationsScreen.kt`):* Built a dedicated in-app notification inbox screen for faculty members. Connects directly to `AttendanceNotificationManager` and the backend `GET /api/v1/notifications/my-notifications` endpoint.
+  2. *Live Unread Badge & Top Bar Action:* Replaced the dormant placeholder notification button on `TeacherClassesScreen.kt` with a live Compose `BadgedBox` showing an unread count badge (e.g. `2`, `9+`). Clicking the bell immediately opens `TeacherNotificationsScreen`.
+  3. *Navigation & Routing (`NavGraph.kt`, `Routes.kt`):* Registered `Routes.TEACHER_NOTIFICATIONS`, mapped back-navigation, and connected notification icons on both `TeacherClassesScreen.kt` and `TeacherTimetableScreen.kt` (`AppTopBar.kt`).
+  4. *Category Filters & Bulk Actions:* Added filter chips for *All*, *Notices* (Academic/Circulars), *Timetable* (Schedule changes/Postponements), and *Unread*, along with single-tap mark-as-read and "Mark all read" header action.
+  5. *Clean Empty State & Material Icons:* Adhered strictly to Hallmark design constraints using real vector iconography (`Icons.Outlined.NotificationsActive`, `Icons.Outlined.Campaign`, `Icons.Outlined.Schedule`), semantic colors, and accessible states.
+* **Verification & Testing Conducted:**
+  - Gradle compilation: `.\gradlew.bat compileDebugKotlin --no-daemon` $ightarrow$ **BUILD SUCCESSFUL in 19s** with zero errors.
+
+---
+
 ### Session: 2026-11-08 23:42:00 IST — Timetable 1-Page Guaranteed Landscape Print, Combined Class Cell Merging & Action Button Fix
 * **Scope:** Web Frontend (`Attendance_frontend/minor-project`)
 * **Features Added & Hardened:**
@@ -185,8 +198,10 @@
   2. *Excessive Row Height & Table Distortion for Merged Faculty Slots:* Solved via `groupCellSlots()` grouping multi-section slots sharing identical rooms and periods into single compact entries.
   3. *TypeScript Type Error in `EnrollmentsTab.tsx`:* Fixed `u.filter(...)` to `(u?.items ?? []).filter(...)` matching the `PaginatedUsers` schema.
 * **Verification & Testing Conducted:**
-  - Production build: `npm run build` $ightarrow$ **✓ 3072 modules transformed, built in 1.82s with zero errors**.
-  - Verified Kotlin compilation for Android: `compileDebugKotlin` $ightarrow$ **BUILD SUCCESSFUL**.
+  - Production build: `npm run build` $
+ightarrow$ **✓ 3072 modules transformed, built in 1.82s with zero errors**.
+  - Verified Kotlin compilation for Android: `compileDebugKotlin` $
+ightarrow$ **BUILD SUCCESSFUL**.
 
 ---
 
