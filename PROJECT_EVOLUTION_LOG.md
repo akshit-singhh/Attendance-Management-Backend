@@ -174,6 +174,20 @@
 
 ## 3. Chronological Chat & Development Activity Trail
 
+### Session: 2026-11-10 23:22:36 IST — Mobile App: Teacher Past Sessions & Interactive Attendance Correction Overhaul
+* **Scope:** Mobile Client (`AttendanceApp/app`), Backend API (`Attendance_backend`)
+* **Features Added & Overhauled:**
+  1. *Interactive Session Explorer (`TeacherRecordsScreen.kt`):* Completely overhauled the previously bare-bones Records tab into an interactive session explorer. Teachers can view their submitted class sessions chronologically with formatted dates, section tags, and live search filtering.
+  2. *Session Detail & Class Metrics Breakdown:* Tapping any past session opens the full class breakdown with summary KPI chips (Total Enrolled, Present Count, Absent Count, and Attendance Rate %).
+  3. *Class Roster Inspection & Filter Chips:* Displays the full enrolled student roster for the selected session date. Supports instant filtering by *All*, *Present*, and *Absent*, as well as real-time search by student name or roll number.
+  4. *Seamless Attendance Correction Dialog:* Eliminated the manual database integer `attendance_record_id` input field. Teachers now simply tap the edit icon next to any student to open a clean correction modal pre-populated with student details, current status, one-tap suggested status toggles (`Present` / `Absent`), and required reason note for HOD approval.
+  5. *Backend Roster Record Binding (`app/schemas/attendance.py`, `app/api/v1/mobile/attendance.py`):* Added `record_id: Optional[int] = None` to `StudentRosterResponse` and mapped existing `AttendanceRecord.id` when fetching session rosters by date, linking individual attendance records directly to mobile correction requests.
+* **Verification & Testing Conducted:**
+  - Android Gradle compilation: `.\gradlew.bat compileDebugKotlin --no-daemon` $ightarrow$ **BUILD SUCCESSFUL in 25s** (0 errors, 0 warnings).
+  - Backend test suite: `python -m pytest tests/test_notifications.py` $ightarrow$ **4 passed in 2.66s**.
+
+---
+
 ### Session: 2026-11-09 22:46:49 IST — Mobile App: Teacher In-App Notification Inbox & Real-Time Badge Integration
 * **Scope:** Mobile Client (`AttendanceApp/app`)
 * **Features Added:**
@@ -183,7 +197,8 @@
   4. *Category Filters & Bulk Actions:* Added filter chips for *All*, *Notices* (Academic/Circulars), *Timetable* (Schedule changes/Postponements), and *Unread*, along with single-tap mark-as-read and "Mark all read" header action.
   5. *Clean Empty State & Material Icons:* Adhered strictly to Hallmark design constraints using real vector iconography (`Icons.Outlined.NotificationsActive`, `Icons.Outlined.Campaign`, `Icons.Outlined.Schedule`), semantic colors, and accessible states.
 * **Verification & Testing Conducted:**
-  - Gradle compilation: `.\gradlew.bat compileDebugKotlin --no-daemon` $ightarrow$ **BUILD SUCCESSFUL in 19s** with zero errors.
+  - Gradle compilation: `.\gradlew.bat compileDebugKotlin --no-daemon` $
+ightarrow$ **BUILD SUCCESSFUL in 19s** with zero errors.
 
 ---
 

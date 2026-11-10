@@ -225,7 +225,7 @@ async def get_class_roster(
             rec_stmt = select(AttendanceRecord).where(AttendanceRecord.session_id == existing_session.id)
             existing_records = (await db.exec(rec_stmt)).all()
             for r in existing_records:
-                status_map[r.student_id] = r.status
+                status_map[r.student_id] = (r.status, r.id)
 
     statement = (
         select(User, StudentProfile)
@@ -239,11 +239,15 @@ async def get_class_roster(
     
     roster = []
     for user, profile in results:
+        rec_data = status_map.get(user.id)
+        stat_val = rec_data[0] if isinstance(rec_data, tuple) else rec_data
+        rec_id = rec_data[1] if isinstance(rec_data, tuple) else None
         roster.append(StudentRosterResponse(
             student_id=user.id,
             roll_number=profile.roll_number,
             full_name=user.full_name,
-            status=status_map.get(user.id)
+            status=stat_val,
+            record_id=rec_id
         ))
         
     return roster
