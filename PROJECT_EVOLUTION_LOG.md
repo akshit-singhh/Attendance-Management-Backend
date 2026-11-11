@@ -170,10 +170,29 @@
 | **Timetable PDF & Print** | N/A | Single-Page Landscape Vector PDF & Print (`zoom: 0.86` fit) | N/A | 🟢 Fully Active |
 | **Tab Back Navigation & Stack** | N/A | React Router history | Compose BackHandler & Tab History Stack | 🟢 Fully Active |
 | **Offline Queue & Auto-Sync** | `POST /mobile/attendance/sync` | N/A | `OfflineAttendanceManager`, Banner & NetworkCallback | 🟢 Fully Active |
+| **Offline Schedule & Roster Cache** | N/A | N/A | `TeacherCacheManager`, JSON file cache, pre-fetch, stale-badge | 🟢 Fully Active |
 
 ---
 
 ## 3. Chronological Chat & Development Activity Trail
+
+### Session: 2026-11-11 23:26:23 IST — Teacher App: Offline-First JSON Cache (Schedule & Roster Pre-Fetch)
+* **Scope:** Mobile Client (`AttendanceApp/app`)
+* **Features Added:**
+  1. *`TeacherCacheManager.kt` (new file):* Lightweight JSON file cache singleton for the teacher's daily schedule and student rosters. Cache files are stored in the app's private `filesDir` — no new Gradle dependencies (uses existing `kotlinx.serialization.json` + `java.io.File`). Key methods: `loadSchedule()`, `saveSchedule()`, `isScheduleCacheForToday()`, `loadRoster(courseOfferingId)`, `saveRoster(courseOfferingId, roster)`, `prefetchRosters(offeringIds, fetchFn)`. Date-stamps the schedule cache to detect stale (yesterday's) data.
+  2. *Cache-First `loadSchedule()` (`TeacherViewModel.kt`):* Rewrote to a **Stale-While-Revalidate** pattern — Step 1: show cached schedule from disk instantly (zero latency, works fully offline); Step 2: fetch fresh data from network in background and update state + disk cache; Step 3: atomically pre-fetch all student rosters for today's classes via `prefetchRosters()` so roll-call works with no signal in the classroom. Network failure keeps the cache displayed with no error shown.
+  3. *Cache-First `loadRoster()` (`TeacherViewModel.kt`):* Rewrote to same pattern — shows cached student roster instantly, fetches network refresh in background, updates cache with fresh data. If offline and cached roster exists, teacher can still mark attendance and queue it via `OfflineAttendanceManager`.
+  4. *`fromCache` badge (`TeacherClassesScreen.kt`):* Added a subtle inline indicator row with `Icons.Outlined.History` and text *"Showing cached schedule from last session"* as the first `item {}` in the `LazyColumn`, shown only when `ScheduleUiState.Loaded.fromCache == true` (i.e., schedule is from a previous day). Follows Hallmark design rules: no emoji, semantic slate-gray color `0xFF64748B`, real SVG Material icon.
+  5. *Disk-cache fallback in `getAllCourses()` (`TeacherViewModel.kt`):* Updated the extra-class dialog loader to fall back to `TeacherCacheManager.loadSchedule()` as a last resort when both network and in-memory schedule are unavailable.
+  6. *`AttendanceApp.kt`:* Wired `TeacherCacheManager.init(this)` during app startup alongside existing `OfflineAttendanceManager.init(this)`.
+* **Files Changed:**
+  - `data/offline/TeacherCacheManager.kt` — created (new file, 150 lines)
+  - `ui/teacher/TeacherViewModel.kt` — `loadSchedule()`, `loadRoster()`, `getAllCourses()` updated; `resolvecourseInfo()` private helper added
+  - `ui/teacher/TeacherClassesScreen.kt` — `fromCache` badge item added to `LazyColumn`
+  - `AttendanceApp.kt` — `TeacherCacheManager.init(this)` wired in `onCreate`
+* **Verification:** `.\gradlew.bat compileDebugKotlin --no-daemon` → **BUILD SUCCESSFUL in 25s** (0 errors, 0 warnings)
+
+---
 
 ### Session: 2026-11-11 22:25:00 IST — Mobile App: Teacher Offline Attendance Queue & Auto-Sync Banner (Option 4)
 * **Scope:** Mobile Client (`AttendanceApp/app`), Network State Management
