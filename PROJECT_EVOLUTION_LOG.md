@@ -169,10 +169,41 @@
 | **Student Timetable & Leaves**| Timetable, Leave balance & requests | Approvals & Allocations | Compose Timetable & Leave Screens | 🟢 Fully Active |
 | **Timetable PDF & Print** | N/A | Single-Page Landscape Vector PDF & Print (`zoom: 0.86` fit) | N/A | 🟢 Fully Active |
 | **Tab Back Navigation & Stack** | N/A | React Router history | Compose BackHandler & Tab History Stack | 🟢 Fully Active |
+| **Offline Queue & Auto-Sync** | `POST /mobile/attendance/sync` | N/A | `OfflineAttendanceManager`, Banner & NetworkCallback | 🟢 Fully Active |
 
 ---
 
 ## 3. Chronological Chat & Development Activity Trail
+
+### Session: 2026-11-11 22:25:00 IST — Mobile App: Teacher Offline Attendance Queue & Auto-Sync Banner (Option 4)
+* **Scope:** Mobile Client (`AttendanceApp/app`), Network State Management
+* **Features Added & Implemented:**
+  1. *Persistent Offline Attendance Manager (`OfflineAttendanceManager.kt`):* Built a thread-safe singleton queue manager. If attendance submission fails due to an unavailable network or server timeout during roll call, the full `OfflineSyncPayload` is safely persisted into internal disk storage (`offline_attendance_queue.json`).
+  2. *Automatic Connectivity Monitoring & Auto-Drain:* Integrated Android `ConnectivityManager.NetworkCallback` with internet capability checks. As soon as device connectivity is restored, the queue automatically wakes up and drains pending offline sessions to `POST /api/v1/mobile/attendance/sync` in the background with zero faculty intervention required.
+  3. *Clean Auto-Sync Indicator Banner (`TeacherClassesScreen.kt`):* Positioned a Hallmark-compliant status chip above the classes list on the Teacher Dashboard:
+     - **Offline Mode:** Displays amber warning chip with `Icons.Outlined.CloudOff` and queue counter (e.g. *"Offline — 2 session(s) queued for upload"*).
+     - **Pending Sync (Online):** Displays soft blue chip with `Icons.Outlined.CloudQueue`, queue count, and a manual **"Sync Now"** action button.
+     - **In-Flight Syncing:** Displays real-time spinner and session upload progress.
+     - **Sync Complete:** Displays emerald confirmation chip with `Icons.Outlined.CloudDone` before smoothly auto-dismissing.
+  4. *Zero Roll-Call Disruption (`TeacherViewModel.kt`):* When teachers mark attendance in areas with poor or no cellular reception, `submitAttendance()` catches network exceptions, enqueues the payload, updates local `submittedOfferingIds` with a green checkmark immediately, and notifies the UI with a completed state.
+  5. *Permissions (`AndroidManifest.xml`):* Added `<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />` for reactive network capability callbacks.
+* **Verification & Testing Conducted:**
+  - Kotlin compilation via Gradle: `.\gradlew.bat compileDebugKotlin --no-daemon` $\rightarrow$ **BUILD SUCCESSFUL in 27s** (0 errors).
+
+---
+
+### Session: 2026-11-11 22:15:00 IST — Student App: Top Bar Back Button Removal & Clean BackStack Navigation Fix
+* **Scope:** Mobile Client (`AttendanceApp/app`)
+* **Features Removed & Streamlined:**
+  1. *Removed Top App Bar Back Button (`StudentCalendarScreen.kt`, `AttendancePlannerScreen.kt`):* Removed `navigationIcon` and `onNavigateBack` from the TopAppBar of both `Attendance Calendar` and `Attendance Planner`. Because both screens are primary destinations hosted inside the persistent bottom navigation pager (`StudentMainPagerScreen.kt`), having a top-level back arrow was visually confusing and out-of-place.
+  2. *Eliminated Redundant `StudentScaffold` from Notifications & Statistics (`NavGraph.kt`):* Removed nested `StudentScaffold` wrapping from `Routes.STUDENT_NOTIFICATIONS` and `Routes.STUDENT_STATISTICS`. Previously, viewing notifications or statistics displayed an out-of-context bottom navigation bar whose tab actions spawned duplicate `RenderStudentPager` instances onto the `NavController` back stack.
+* **Bugs & Regressions Resolved:**
+  1. *App Closure on Back Press:* Tapping the top `<` button previously triggered `onNavigateBack()` which invoked `navController.popBackStack()`. Because the student main pager was the root destination, this abruptly terminated the activity and exited the app. With the misleading button removed and `StudentNotificationsScreen`/`StudentStatisticsScreen` properly popping back to the pager, back navigation returns to the previous screen as expected.
+  2. *Predictable Tab Back Navigation:* The Jetpack Compose `BackHandler` in `StudentMainPagerScreen` maintains a visited tab history stack, so pressing the physical/system back button steps backward through visited tabs (e.g. Calendar $\rightarrow$ Planner $\rightarrow$ Dashboard) before exiting on the root Home tab.
+* **Verification & Testing Conducted:**
+  - Android Gradle Kotlin compilation: `cd "D:\Attendance app\AttendanceApp\app"; .\gradlew.bat compileDebugKotlin --no-daemon` $\rightarrow$ **BUILD SUCCESSFUL in 25s** (zero compilation errors).
+
+---
 
 ### Session: 2026-11-10 23:22:36 IST — Mobile App: Teacher Past Sessions & Interactive Attendance Correction Overhaul
 * **Scope:** Mobile Client (`AttendanceApp/app`), Backend API (`Attendance_backend`)
