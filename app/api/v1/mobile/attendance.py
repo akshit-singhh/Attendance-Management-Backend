@@ -407,6 +407,7 @@ async def sync_offline_attendance(
 
     db.add_all(db_records)
     await db.commit()
+    created_session_id = new_session.id
 
     # Dispatch student push notifications in background for ABSENT / LEAVE
     try:
@@ -439,7 +440,7 @@ async def sync_offline_attendance(
     return {
         "status": "success",
         "message": f"Successfully synchronized {len(db_records)} records.",
-        "session_id": new_session.id
+        "session_id": created_session_id
     }
     
 @router.get("/history", response_model=List[SessionHistoryResponse])
@@ -619,7 +620,7 @@ async def postpone_class(
                 user_ids=list(enrolled_student_ids),
                 title=title,
                 message=message,
-                notification_type="SYSTEM",
+                notification_type="ACADEMIC_ORDER",
                 priority="NORMAL",
                 section_id=offering.section_id
             )

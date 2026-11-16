@@ -44,9 +44,9 @@ class Notification(SQLModel, table=True):
     sender_id: int = Field(foreign_key="user.id", index=True)
     title: str = Field(index=True)
     message: str
-    notification_type: str = Field(default="ANNOUNCEMENT")
-    priority: str = Field(default="NORMAL")
-    scope_type: str = Field(default="UNIVERSITY")
+    notification_type: NotificationType = Field(default=NotificationType.ANNOUNCEMENT)
+    priority: NotificationPriority = Field(default=NotificationPriority.NORMAL)
+    scope_type: NotificationScope = Field(default=NotificationScope.UNIVERSITY)
     scope_id: Optional[int] = Field(default=None)
     target_role: Optional[str] = Field(default="ALL")  # "ALL", "STUDENT", "TEACHER", "COORDINATOR", etc.
     action_url: Optional[str] = Field(default=None)

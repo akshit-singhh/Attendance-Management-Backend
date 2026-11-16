@@ -170,11 +170,275 @@
 | **Timetable PDF & Print** | N/A | Single-Page Landscape Vector PDF & Print (`zoom: 0.86` fit) | N/A | 🟢 Fully Active |
 | **Tab Back Navigation & Stack** | N/A | React Router history | Compose BackHandler & Tab History Stack | 🟢 Fully Active |
 | **Offline Queue & Auto-Sync** | `POST /mobile/attendance/sync` | N/A | `OfflineAttendanceManager`, Banner & NetworkCallback | 🟢 Fully Active |
-| **Offline Schedule & Roster Cache** | N/A | N/A | `TeacherCacheManager`, JSON file cache, pre-fetch, stale-badge | 🟢 Fully Active |
+| **Offline Schedule & Roster Cache** | N/A | N/A | `TeacherCacheManager`, JSON cache, pre-fetch, stale-badge | 🟢 Fully Active |
+| **Connectivity Transition Strip** | N/A | N/A | `ConnectivityStrip` above navbar, auto-dismiss green banner | 🟢 Fully Active |
+| **Tri-State Roll Call & Safety Net** | `POST /mobile/attendance/sync` | N/A | P/A/L pills, Leave filter, Mark All dropdown, auto-absent safety dialog | 🟢 Fully Active |
 
 ---
 
 ## 3. Chronological Chat & Development Activity Trail
+
+### Session: 2026-11-13 03:05:00 IST — Mobile Client: Fix Invalid Compose Compiler Gradle Plugin on Kotlin 1.9.24
+* **Scope:** Mobile Client (`AttendanceApp/app`), `app/build.gradle.kts`
+* **Issues Addressed:**
+  - *Gradle Sync Failure:* Project sync failed with `Plugin [id: 'org.jetbrains.kotlin.plugin.compose'] was not found in any of the following sources`.
+  - *Root Cause:* The Gradle plugin `org.jetbrains.kotlin.plugin.compose` (Kotlin Compose Compiler Gradle plugin) is designed for Kotlin 2.0.0+. The Android project uses Kotlin 1.9.24 (`org.jetbrains.kotlin.android` 1.9.24), where Compose compiler features are configured via AGP (`buildFeatures { compose = true }` and `composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }`). Including `org.jetbrains.kotlin.plugin.compose` in `app/build.gradle.kts` caused plugin resolution failure during Gradle sync.
+* **Changes Applied:**
+  - *Removed Invalid Plugin:* Removed `id("org.jetbrains.kotlin.plugin.compose")` from `app/build.gradle.kts`.
+* **Verification:**
+  - Ran `gradle_build("app:compileDebugKotlin")` $\rightarrow$ **Build finished successfully.**
+  - Executed `gradle_sync` $\rightarrow$ **Sync finished successfully.**
+
+### Session: 2026-11-13 02:33:50 IST — Teacher App: Pixel-Perfect Shimmer Skeleton Matching Actual Classes UI Layout
+* **Scope:** Mobile Client (`AttendanceApp/app`), `TeacherClassesScreen.kt`, `ShimmerEffects.kt`
+* **Issues Addressed:**
+  1. *Skeleton Didn't Match UI (Image 1 vs Image 2):* Previously, `ScheduleUiState.Loading` stripped out all persistent dashboard controls (`DashboardTabSelector`, `DailyProgressSection` progress bar, KPI stat boxes for conducted/expected classes, and `SectionHeader` with `+ Extra Class`). This caused the entire top section of the screen to vanish and re-appear abruptly.
+  2. *Card Skeleton Discrepancies:* The card skeleton rendered a single full-width gray block instead of the actual card's dual buttons (`[ Mark Attendance ]` and `[ Postpone ]`), and was missing the left vertical status strip, proper code/credits/section badge placeholders, and icon indicators for time and room.
+* **Changes Applied:**
+  1. *Persistent Dashboard Structure (`TeacherClassesScreen.kt`):*
+     - Re-architected the main screen so `DashboardTabSelector`, `DailyProgressSection` (progress bar and 2 KPI stat cards), and `SectionHeader` remain visible and in place during loading and refreshing.
+     - Skeleton shimmer cards are rendered specifically inside the class list section under the header, eliminating layout shifting or disappearing controls.
+  2. *Pixel-Perfect `TeacherClassCardSkeleton` (`ShimmerEffects.kt`):*
+     - Added the left status indicator strip (`Box` with rounded start corners).
+     - Aligned top badge placeholders: Subject code pill, Credits pill, Section text, and Status pill on the right.
+     - Modeled exact lines for Subject title, Time block (with clock icon placeholder), and Room block (with room icon placeholder).
+     - Added divider and dual button action placeholders matching the real `ClassCard`: wide primary button on the left (`[ Mark Attendance ]`) and secondary outlined button on the right (`[ Postpone ]`).
+* **Verification:** `cd "D:\Attendance app\AttendanceApp\app"; .\gradlew.bat compileDebugKotlin --no-daemon` $\rightarrow$ **BUILD SUCCESSFUL in 53s** (0 errors).
+
+---
+
+### Session: 2026-11-13 02:27:27 IST — Teacher App: Remove Redundant Session Roster Offline Banner & Add Shimmer Skeleton Cards on Refresh
+* **Scope:** Mobile Client (`AttendanceApp/app`), `TeacherRecordsScreen.kt`, `TeacherClassesScreen.kt`, `TeacherTimetableScreen.kt`, `TeacherViewModel.kt`, `ShimmerEffects.kt`
+* **Changes Applied:**
+  1. *Removed Redundant Offline Banner from Session Roster Screen (`TeacherRecordsScreen.kt`):*
+     - Removed the duplicate amber "No Internet Connection" notice card from inside the session details/roster screen (`selectedSession != null`). The user already sees the offline banner on the main sessions list screen and the bottom nav connectivity strip.
+  2. *Shimmer Skeleton Cards Component Library (`ShimmerEffects.kt`):*
+     - Added `TeacherSessionCardSkeleton()`: Shimmer skeleton card for session history items.
+     - Added `TeacherRosterStudentCardSkeleton()`: Shimmer skeleton card for student rows with name, roll number, and status badge placeholders.
+     - Added `TeacherClassCardSkeleton()`: Shimmer skeleton card for teacher dashboard classes with course badge, title, time, and button placeholders.
+  3. *Fluid Shimmer Skeleton Animation on Reconnection & Refresh:*
+     - When internet connectivity is restored (`isOnline == true` after `wasOffline == true`):
+       - Main sessions list displays shimmering `TeacherSessionCardSkeleton` cards while retrieving fresh data.
+       - Session roster view displays shimmering `TeacherRosterStudentCardSkeleton` cards while retrieving fresh roster data.
+       - Classes dashboard and Timetable views display shimmering skeleton cards during refresh.
+       - Live cards smoothly replace skeletons once fresh network data arrives.
+* **Verification:** `cd "D:\Attendance app\AttendanceApp\app"; .\gradlew.bat compileDebugKotlin --no-daemon` $\rightarrow$ **BUILD SUCCESSFUL in 1m** (0 errors).
+
+---
+
+### Session: 2026-11-13 02:12:14 IST — Teacher App: Offline Warning Banner for Cached Sessions, System-wide Online Detection & Auto-Refresh
+* **Scope:** Mobile Client (`AttendanceApp/app`), `TeacherRecordsScreen.kt`, `TeacherClassesScreen.kt`, `TeacherTimetableScreen.kt`, `TeacherViewModel.kt`, `OfflineAttendanceManager.kt`
+* **Issues Addressed:**
+  1. *Root Cause of Missing "No Internet" Notice on Records Screen:* When `history` was loaded from cache, the network failure in `repo.getHistory()` previously swallowed the error (`if (history.isEmpty()) historyError = ...`), causing the screen to render cached records without notifying the user why fresh data could not be retrieved.
+  2. *Stuck Offline / Lack of Auto-Refresh:* Screens did not listen to network restoration events, requiring an app restart to reload fresh data once internet was restored.
+  3. *Unwanted "Showing cached schedule" text:* Removed redundant "Showing cached schedule from last session" banner per user specification.
+* **Changes Applied:**
+  1. *Non-Intrusive Offline Warning Notice (`TeacherRecordsScreen.kt`):*
+     - Added `isHistoryOfflineNotice` and `isRosterOfflineNotice` state tracking.
+     - When offline or when the network call fails while cached sessions exist, a warm, professional amber banner appears below the header:
+       `[CloudOff] No Internet Connection • Showing saved sessions. Reconnect to get latest data. [ Retry ]`.
+     - When no cache exists, a full-page clean warning card with `Icons.Outlined.CloudOff` and "Retry" is shown instead of raw host resolution errors.
+     - Tapping "Retry" re-attempts fresh data load immediately.
+  2. *Default System Network Callback & Online Marking (`OfflineAttendanceManager.kt`):*
+     - Upgraded connectivity tracking to `cm.registerDefaultNetworkCallback()` for robust system-wide detection across Wi-Fi, cellular, and VPN interfaces.
+     - Added explicit `markOnline()` and `markOffline()` methods invoked by repositories and viewmodels on successful responses and network exceptions.
+  3. *Reactive Auto-Refresh on Network Restoration:*
+     - Added `LaunchedEffect(isOnline)` in `TeacherRecordsScreen.kt`, `TeacherClassesScreen.kt`, and `TeacherTimetableScreen.kt`. As soon as internet connectivity is restored, all screens automatically refresh to fetch and display the latest data from the server and dismiss offline notices without user intervention.
+* **Verification:** `cd "D:\Attendance app\AttendanceApp\app"; .\gradlew.bat compileDebugKotlin --no-daemon` $\rightarrow$ **BUILD SUCCESSFUL in 1m** (0 errors).
+
+---
+
+### Session: 2026-11-13 01:47:34 IST — Teacher App: Offline Timetable Caching, Simplified Connectivity Banner, Profile Navigation & Offline Warning UI
+* **Scope:** Mobile Client (`AttendanceApp/app`), `TeacherCacheManager.kt`, `TeacherViewModel.kt`, `TeacherTimetableScreen.kt`, `TeacherRecordsScreen.kt`, `ProfileViewModel.kt`, `ProfileScreen.kt`, `BottomNavBars.kt`, `AppTopBar.kt`, `NavGraph.kt`
+* **Changes Applied:**
+  1. *Simplified Connectivity Strip Banner (`BottomNavBars.kt`):*
+     - Replaced verbose `"Offline • Working with cached data"` with clean, minimal `"Offline"`.
+  2. *Offline Timetable Caching (`TeacherCacheManager.kt`, `TeacherViewModel.kt`):*
+     - Added `loadTimetable()` and `saveTimetable()` JSON disk caching in `TeacherCacheManager.kt` (`teacher_timetable_cache.json`).
+     - Enhanced `TeacherViewModel.loadTimetable()` with cache-first strategy: immediately renders cached timetable on tab switch (zero latency, fully functional offline). Fresh network fetch updates cache; network failures do not disrupt the view if cached data is already present.
+  3. *Offline History & Profile Caching (`TeacherCacheManager.kt`, `TeacherRecordsScreen.kt`, `ProfileViewModel.kt`):*
+     - Added history caching (`teacher_history_cache.json`) and profile caching (`user_profile_cache.json`).
+     - `TeacherRecordsScreen.kt` and `ProfileViewModel.kt` read instantly from cache so history and profile screens load immediately offline.
+  4. *Professional Offline Warning UI (`TeacherTimetableScreen.kt`, `TeacherRecordsScreen.kt`, `ProfileScreen.kt`):*
+     - Added `TeacherCacheManager.isNetworkError()` to detect DNS/host resolution, socket timeouts, and offline states.
+     - Replaced raw Java/Android socket exceptions (`Unable to resolve host...`) and harsh red crash cards with clean, polished warning states featuring soft amber styling (`#FEF3C7`), `Icons.Outlined.CloudOff`, and a clear "No Internet Connection" title with a "Retry" button.
+  5. *Fixed Profile Button Navigation in Attendance Records (`TeacherRecordsScreen.kt`, `NavGraph.kt`, `AppTopBar.kt`):*
+     - Passed `onOpenProfile = { navController.navigate(Routes.PROFILE) }`, `onLogout`, and `onNavigateToNotifications` from `NavGraph.kt` into `TeacherRecordsScreen.kt`.
+     - Tapping the profile button now directly opens `Routes.PROFILE` without displaying an unwanted "Log Out" dropdown popup.
+     - Added `userInitials` support to `AppTopBar.kt`, unifying the teacher avatar (`VS`) across Classes, Timetable, Records, and Roll Call screens.
+* **Verification:** `cd "D:\Attendance app\AttendanceApp\app"; .\gradlew.bat compileDebugKotlin --no-daemon` $\rightarrow$ **BUILD SUCCESSFUL in 58s** (0 errors).
+
+---
+
+### Session: 2026-11-13 01:17:36 IST — Teacher App: Single Edit Attendance Action, Course Header Loading Fix & Diff Confirmation Dialog
+* **Scope:** Mobile Client (`AttendanceApp/app`), `TeacherRecordsScreen.kt`, `TeacherViewModel.kt`, `TeacherRollCallScreen.kt`
+* **Changes Applied:**
+  1. *De-duplicated Past Session Edit Actions (`TeacherRecordsScreen.kt`):*
+     - Removed redundant edit pencil icon buttons (`Icons.Default.Edit`) from individual student rows (`RosterStudentCard`).
+     - Kept a clean, prominent top **`[ Edit Attendance ]`** button as the single clear action to edit the session.
+     - Streamlined student cards to display only the student name, roll number, and read-only `StatusPill`.
+  2. *Resolved "Loading..." Course Header in Edit Attendance (`TeacherViewModel.kt`):*
+     - Identified root cause: `resolvecourseInfo` previously only checked today's schedule (`_schedule.value` and today's disk cache). When editing past classes from other days of the week (e.g. Wednesday's `Internet of Things Lab` when today is Thursday), `courseInfo` evaluated to `null`, causing the header to fall back to `"Loading..."`, `"---"`, `"Sec --"`, and `"Room TBD"`.
+     - Added thread-safe in-memory `courseInfoCache` (`ConcurrentHashMap<Int, CourseScheduleResponse>`).
+     - Made `resolvecourseInfo` asynchronous: falls back to querying `repo.getSchedule(null, "ALL")` (which retrieves all classes across all days for the teacher) and synthesizing course details from `repo.getHistory()`.
+     - Populated `initialMarks` in `RosterUiState.Loaded` to track baseline attendance state upon roster load.
+  3. *Change Summary Diff Dialog on Edit Submission (`TeacherRollCallScreen.kt`):*
+     - When submitting edits (`isEditing == true`), the confirmation dialog calculates and displays an explicit breakdown of all modified student records (`s.initialMarks` vs `s.marks`).
+     - If no attendance statuses were changed, displays `"No attendance statuses were changed."` and enables `"Save Anyway"`.
+     - If changes are present, displays a scrollable preview listing each modified student with roll number and status transition badge (e.g. `[ Absent ] → [ Present ]`, `[ Present ] → [ Leave ]`).
+     - Confirmation button dynamically displays the change count (`Save X Changes`).
+* **Verification:** `cd "D:\Attendance app\AttendanceApp\app"; .\gradlew.bat compileDebugKotlin --no-daemon` $\rightarrow$ **BUILD SUCCESSFUL in 1m 7s** (0 errors).
+
+---
+
+### Session: 2026-11-13 00:30:51 IST — Teacher App: Direct Past Session Attendance Editing (Purged Legacy HOD Correction Modal)
+* **Scope:** Mobile Client (`AttendanceApp/app`), `TeacherRecordsScreen.kt`, `NavGraph.kt`
+* **Changes Applied:**
+  1. *Purged Obsolete HOD Approval Dialog (`TeacherRecordsScreen.kt`):* Completely removed the legacy `"Request Attendance Correction"` dialog, the `"Submit for HOD Approval"` action, the mandatory reason input field, and associated orphaned state (`correctingStudent`, `suggestedStatus`, `correctionReason`, `submittingCorrection`, `correctionError`).
+  2. *Integrated Direct Attendance Editing:*
+     - Added a prominent primary **`[ Edit Attendance Directly ]`** action button to the Session KPI Summary card in `TeacherRecordsScreen.kt`.
+     - Updated student cards (`RosterStudentCard`) so that tapping either the student card or the edit button (`Icons.Default.Edit`) immediately triggers `onEditSession(courseOfferingId, sessionDate)`.
+  3. *Wired Direct Roll Call Navigation (`NavGraph.kt`):* Connected `onEditSession` to `navController.navigate(Routes.rollCall(offeringId, sessionDate))`. This opens `TeacherRollCallScreen` directly in **"Edit Attendance"** mode with that past session's student marks pre-populated, enabling faculty to directly adjust statuses via `[ P ]`, `[ A ]`, `[ L ]` and save changes immediately to the database without requiring administrative approval.
+* **Verification:** `cd "D:\Attendance app\AttendanceApp\app"; .\gradlew.bat compileDebugKotlin --no-daemon` $\rightarrow$ **BUILD SUCCESSFUL in 48s** (0 errors, 0 warnings).
+
+---
+
+### Session: 2026-11-13 00:21:53 IST — Teacher App: Enable Early Roll Call for Upcoming Classes
+* **Scope:** Mobile Client (`AttendanceApp/app`), `TeacherClassesScreen.kt`
+* **Changes Applied:**
+  1. *Enabled Roll Call on Upcoming Classes:* Previously, `ClassState.UPCOMING` only showed a passive `"Scheduled Session"` label alongside a `"Postpone"` button, preventing teachers from taking attendance before the bell rings.
+  2. *Unified Active Action Bar:* Consolidated `ClassState.ACTIVE`, `ClassState.MISSED`, and `ClassState.UPCOMING` into a single responsive action row. Upcoming classes now feature a prominent `[ Mark Attendance ]` button in `PrimaryBlue` next to the `[ Postpone ]` button, allowing faculty to start roll call early whenever needed.
+* **Verification:** `cd "D:\Attendance app\AttendanceApp\app"; .\gradlew.bat compileDebugKotlin --no-daemon` $\rightarrow$ **BUILD SUCCESSFUL in 18s** (0 errors, 0 warnings).
+
+---
+
+### Session: 2026-11-13 00:19:31 IST — Teacher App: Temporary Date Override to 12 Nov 2026 (Thursday Schedule Testing)
+* **Scope:** Mobile Client (`AttendanceApp/app`), `TeacherViewModel.kt`, `TeacherClassesScreen.kt`, `TeacherRollCallScreen.kt`, `TeacherCacheManager.kt`, `TeacherTimetableScreen.kt`
+* **Changes Applied:**
+  1. *Temporary Date & Day Override:* Hardcoded `EffectiveDate = LocalDate.of(2026, 11, 12)` and `EffectiveDay = "THU"` across the teacher app module so that the logged-in faculty (Prof. Vidushi Sharma) can access and interact with their Thursday classes (`CS525`, `CS481`, etc.) despite today being Friday (`2026-11-13`) where they have no scheduled classes.
+  2. *Schedule Fetching (`TeacherViewModel.kt`):* Updated `loadSchedule()` to query backend for `THU` and compare history against `"2026-11-12"`.
+  3. *Roll Call & Cache Synchronization:* Updated `TeacherRollCallScreen.kt`, `TeacherClassesScreen.kt`, `TeacherTimetableScreen.kt`, and `TeacherCacheManager.kt` so that offline caching, roll call submissions, and live timetable period indicator sync with Thursday, 12 November 2026.
+* **Verification:** `cd "D:\Attendance app\AttendanceApp\app"; .\gradlew.bat compileDebugKotlin --no-daemon` $\rightarrow$ **BUILD SUCCESSFUL in 52s** (0 errors, 0 warnings).
+
+---
+
+### Session: 2026-11-13 00:08:02 IST — Teacher App: Roll Call Leave Marking (P/A/L), Dropdown Mark All & Duplicate Counter Fix
+* **Scope:** Mobile Client (`AttendanceApp/app`), `TeacherRollCallScreen.kt`, `TeacherViewModel.kt`, `Models.kt`, `TeacherRecordsScreen.kt`
+* **Changes & Features Added:**
+  1. *Eliminated Duplicate Unmarked Count Text:* Removed the redundant left-side subtitle (`"$unmarkedCount students unmarked"`) from `BottomSubmitBar`. The bottom bar now cleanly displays `$presentCount Present • $absentCount Absent (• $leaveCount Leave)` on the left, paired with the amber badge `"$unmarkedCount Unmarked"` on the right.
+  2. *Top Dropdown "Mark All" Menu (`SearchAndFilterRow`):*
+     - Replaced the single-action "Mark All" button with an interactive `DropdownMenu` triggered by tapping `Mark All ▾`.
+     - Options provided:
+       - **All Present:** Marks all enrolled students as `PRESENT` with a green checkmark.
+       - **All Absent:** Marks all enrolled students as `ABSENT` with a red cross.
+       - **Reset to Unmarked:** Clears all marks back to neutral/unmarked (`null`).
+  3. *3rd "Leave" Action Button (`[ L ]`) on Student Rows (`RosterRow`):*
+     - Added `AttendanceStatus.LEAVE` to `Models.kt`, matching the backend schema and push notification engine.
+     - Each student card now displays three side-by-side action pills: `[ P ]`, `[ A ]`, and `[ L ]`.
+     - When `LEAVE` is selected: `L` button fills solid warm amber (`#D97706`) with white text; the student card softly tints warm cream/amber (`#FFFBEB`) with subtle border; `P` and `A` remain neutral outline pills.
+     - Tapping `L` again toggles the student back to unmarked (`null`).
+  4. *Dedicated "Leave" Filter Chip:* Added `"Leave"` chip with active student count alongside `All`, `Unmarked`, `Present`, and `Absent`.
+  5. *History Status Pill (`TeacherRecordsScreen.kt`):* Added `AttendanceStatus.LEAVE` support to `StatusPill` with `Icons.Outlined.EventBusy` and `"On Leave"` label.
+* **Verification:** `cd "D:\Attendance app\AttendanceApp\app"; .\gradlew.bat compileDebugKotlin --no-daemon` $\rightarrow$ **BUILD SUCCESSFUL in 47s** (0 errors, 0 warnings).
+
+---
+
+### Session: 2026-11-12 23:58:48 IST — Teacher App: Tri-State Roll Call Marking (Pattern 1) & Unmarked Safety Net (Pattern 3)
+* **Scope:** Mobile Client (`AttendanceApp/app`), `TeacherRollCallScreen.kt`, `TeacherViewModel.kt`
+* **Features Implemented & Overhauled:**
+  1. *Tri-State Attendance State (`TeacherViewModel.kt`):* Changed `RosterUiState.Loaded.marks` to `Map<Int, AttendanceStatus?>` where `null` represents `UNMARKED`. When opening a new class session, students load unselected (`null`) rather than erroneously defaulting everyone to `PRESENT`.
+  2. *Dual `[ P ]` / `[ A ]` Pill Toggles (`TeacherRollCallScreen.kt` - Pattern 1):*
+     - Replaced single toggle button with side-by-side tactile pill buttons for each student card.
+     - **Unmarked State (`null`):** Both `P` and `A` buttons display as neutral outline pills (`#CBD5E1` border, gray text) waiting for faculty input.
+     - **Present State (`PRESENT`):** `P` pill fills solid emerald green with white text; `A` remains neutral outline. Tapping `P` again toggles student back to `UNMARKED`.
+     - **Absent State (`ABSENT`):** `A` pill fills solid crimson red with white text; card softly tints pink/red (`#FFF5F5`) with red border; `P` remains neutral outline. Tapping `A` again toggles back to `UNMARKED`.
+     - Teachers can still use the header **"Mark All"** button to instantly mark all students as `PRESENT` for speed when attendance is high.
+  3. *Unmarked Filter & Horizontal Chips (`TeacherRollCallScreen.kt`):* Added an `"Unmarked"` filter chip alongside `All`, `Present`, and `Absent`, with active counts and horizontal scrolling to prevent truncation on smaller screens.
+  4. *Smart Safety Net Dialog on Submission (`TeacherRollCallScreen.kt` - Pattern 3):*
+     - If the teacher taps "Submit Attendance" while any students remain unmarked (`unmarkedCount > 0`), the app intercepts submission with an `AlertDialog`:
+       - Shows warning *"Unmarked Students ($unmarkedCount)"*.
+       - **Action 1 ("Mark Absent & Submit"):** Calls `viewModel.submitAttendance(defaultUnmarkedTo = AttendanceStatus.ABSENT)` to automatically mark all unmarked students as absent and submit in one tap.
+       - **Action 2 ("Review"):** Instantly activates the `"UNMARKED"` filter chip and dismisses the dialog so faculty can review remaining unverified students.
+       - **Action 3 ("Cancel"):** Dismisses without changes.
+     - If all students are marked (`unmarkedCount == 0`), the standard confirmation summary dialog appears directly.
+  5. *Live Unmarked Indicator in Bottom Bar:* Bottom submit bar displays dynamic counters (`$presentCount Present • $absentCount Absent` + `$unmarkedCount students unmarked` badge in amber) so progress is clearly visible.
+* **Verification:** `cd "D:\Attendance app\AttendanceApp\app"; .\gradlew.bat compileDebugKotlin --no-daemon` $\rightarrow$ **BUILD SUCCESSFUL in 50s** (0 errors, 0 warnings).
+
+---
+
+### Session: 2026-11-12 23:47:34 IST — Teacher App: Roll Call Screen UI Overhaul & Profile Navigation Integration
+* **Scope:** Mobile Client (`AttendanceApp/app`), `TeacherRollCallScreen.kt`, `NavGraph.kt`
+* **Features Overhauled:**
+  1. *Integrated Profile & Back Navigation (`TeacherRollCallScreen.kt`, `NavGraph.kt`):* Replaced legacy `AppTopBar` with a dedicated, polished `TopAppBar`:
+     - Added system back button (`Icons.AutoMirrored.Filled.ArrowBack`) allowing faculty to return cleanly to `Classes` without saving accidental changes.
+     - Wired the teacher's profile circle with real initials (e.g. `"VS"` in `PrimaryBlue` circle), directly navigating to `Routes.PROFILE` via `onOpenProfile` — completely eliminating the outdated "Log Out" dropdown popup.
+     - Connected the notifications bell icon with live badge counter to `Routes.TEACHER_NOTIFICATIONS`.
+  2. *Overhauled Course Header Card (`RollCallHeader`):*
+     - Eliminated the floating live wall clock box that was cutting off subject titles and section names with awkward asymmetric padding.
+     - Clean, balanced card layout displaying:
+       - Subject code badge (`CS525`) + Credits (`3 Credits`) + Mode pill (`ROLL CALL` / `EDITING`).
+       - Large, bold subject name (`Research Techniques in ICT`).
+       - Meta row with icons: Section `Sec MT-DS-I` • Room `ICT-Conf Hall` • Session Date `12 Nov 2026`.
+  3. *Clean Search & Filter Controls:* Modernized search input and filter chips (`All`, `Present`, `Absent`) with explicit counts and unified design tokens.
+* **Verification:** `.\gradlew.bat compileDebugKotlin --no-daemon` $\rightarrow$ **BUILD SUCCESSFUL in 1m** (0 errors, 0 warnings).
+
+---
+
+### Session: 2026-11-12 23:38:02 IST — Teacher App: Header & ClassCard Decluttering (Removed Overdue, Duplicate Banners, and Redundant Meta)
+* **Scope:** Mobile Client (`AttendanceApp/app`), `TeacherClassesScreen.kt`
+* **Changes Applied:**
+  1. *Header Decluttering:* Removed the redundant `"Faculty • Computer Science and Engineering"` subtitle from the top dashboard header. Replaced it with a clean date format (`Thursday, 12 November`), keeping faculty role and department details inside the Profile screen where they belong.
+  2. *Removed Misleading "Overdue" Status:* Classes that ended earlier today without attendance are now labeled `"Unmarked"` in a calm, warm badge (`Color(0xFFFFF7ED)`, text `Color(0xFFC2410C)`) instead of an alarming `"⚠️ Overdue"` label.
+  3. *Eliminated 3x Redundant Status Duplication on ClassCards:*
+     - Completely removed the redundant middle chip banner (`Class Ended • Unmarked` / `Now Active`).
+     - Simplified the time row to just the schedule (`11:30 AM - 12:30 PM`) without repeating `Ended (Not Marked)`. (For upcoming classes, `• Starts in X mins` is kept).
+     - Each card now displays its status **once and only once** in the top-right status pill (`Submitted`, `In Progress`, `Unmarked`, or `Upcoming`).
+* **Verification:** `.\gradlew.bat compileDebugKotlin --no-daemon` $\rightarrow$ **BUILD SUCCESSFUL in 1m 3s** (0 errors, 0 warnings).
+
+---
+
+### Session: 2026-11-12 22:56:09 IST — Mobile App: Global Connectivity Strip & Transition Banner (Offline / Back Online)
+* **Scope:** Mobile Client (`AttendanceApp/app`), `BottomNavBars.kt`, `TeacherClassesScreen.kt`
+* **Features Added:**
+  1. *`ConnectivityStrip` Composable (`BottomNavBars.kt`):* Created a system-wide, reactive network status bar positioned directly above the bottom navigation bar (`AppBottomNav`).
+     - **Offline State:** When internet is lost (`!isOnline`), an amber-bordered strip appears with `Icons.Outlined.CloudOff` stating *"Offline • Working with cached data"* (or showing pending queue count if sessions are waiting to sync). Stays visible as long as device is disconnected.
+     - **Back Online State:** When connectivity is restored, the bar smoothly transitions into a soft mint/green-bordered bar with `Icons.Outlined.CloudDone` stating *"Back online"* (or *"Back online • Syncing attendance..."* if background sync is running).
+     - **Auto-Dismiss:** Stays visible for 2.8 seconds so the user clearly sees confirmation of reconnection, then smoothly collapses and fades out (`AnimatedVisibility(exit = shrinkVertically() + fadeOut())`).
+     - **Initial Online State:** Does not show on app launch if the device is already online; only activates upon actual network state transitions.
+  2. *Wired into `AppBottomNav`:* Added directly inside `AppBottomNav` Column container, meaning all Teacher tabs (Classes, Timetable, Records) and Student tabs (Dashboard, Subjects, Timetable, Planner, Calendar) automatically inherit the connectivity strip without individual screen scaffolding.
+  3. *De-duplicated Screen Banners (`TeacherClassesScreen.kt`):* Simplified `OfflineSyncBanner` so it only displays when there are actual queued sessions or active syncing in progress (`queuedCount > 0 || isSyncing || lastSyncMessage != null`), avoiding duplicate generic offline banners on the screen.
+* **Verification:** `.\gradlew.bat compileDebugKotlin --no-daemon` $\rightarrow$ **BUILD SUCCESSFUL in 53s** (0 errors, 0 warnings).
+
+---
+
+### Session: 2026-11-11 23:50:31 IST — Backend Fix: Notification Enum Type Mismatch on Attendance Submission
+* **Scope:** Backend API (`Attendance_backend`), Database Mapping (`app/models/notification.py`, `app/api/v1/mobile/attendance.py`)
+* **Root Cause Analysis:**
+  When faculty submitted attendance with absent/leave records, the endpoint dispatched push notifications via `notify_users()`. In PostgreSQL, the `notification.notification_type`, `priority`, and `scope_type` columns are custom user-defined enums (`notificationtype`, `notificationpriority`, `notificationscope`). However, in `app/models/notification.py`, `Notification` had typed those three fields as generic `str`.
+  During asyncpg query execution, SQLAlchemy bound parameters as `VARCHAR` (`$4::VARCHAR`), triggering PostgreSQL error:
+  `asyncpg.exceptions.DatatypeMismatchError: column "notification_type" is of type notificationtype but expression is of type character varying`.
+  This aborted the database session transaction. When the endpoint subsequently accessed `new_session.id`, SQLAlchemy raised `PendingRollbackError` and returned HTTP 500.
+* **Fix Applied:**
+  1. *Model Enum Typing (`app/models/notification.py`):* Explicitly typed `notification_type: NotificationType`, `priority: NotificationPriority`, and `scope_type: NotificationScope` in the `Notification` SQLModel table. SQLModel now generates native PostgreSQL enum bindings (`notificationtype`, `notificationpriority`, `notificationscope`).
+  2. *Captured Session ID Before Notifications (`attendance.py`):* Saved `created_session_id = new_session.id` immediately after `await db.commit()`, ensuring the response payload is decoupled from any secondary notification transaction.
+  3. *Fixed Postponement Enum (`attendance.py`):* Replaced invalid `"SYSTEM"` with valid `"ACADEMIC_ORDER"` for class postponement alerts.
+* **Verification:**
+  Direct test execution against the database via `notify_users` for absent student notifications confirmed: `SUCCESS! Created notification via notify_users` (0 errors).
+
+---
+
+### Session: 2026-11-11 23:39:26 IST — Teacher App: UTF-8 Mojibake / Corrupted Character Fix
+* **Scope:** Mobile Client (`AttendanceApp/app`), `TeacherClassesScreen.kt`
+* **Bug Analysis:**
+  The `â€¢`, `â€“`, and `âšï¸ ` strings shown in the UI were classic **Mojibake** (character encoding mismatch). UTF-8 byte sequences for bullet points `•` (`0xE2 0x80 0xA2`), en-dashes `–` (`0xE2 0x80 0x93`), and emojis had previously been saved or interpreted through Windows-1252 / ANSI encoding, resulting in visible `â€¢` and `â€“` artifacts on screen.
+* **Fix Applied:**
+  1. Replaced all raw multi-byte delimiter literals across `TeacherClassesScreen.kt` with explicit Unicode escape sequences (`\u2022`) or clean ASCII hyphens (`-`).
+  2. Fixed time block formatting from `"$s â€“ $e"` to standard `"$s - $e"`.
+  3. Cleaned status and section badges: `Class Ended \u2022 Unmarked`, `Sec: ... \u2022 Date: ...`.
+  4. Removed emoji mojibake (`âšï¸ ` / `â ³`) from the pending expiry tag to comply with Hallmark design rules (no emojis as icons; clean text: `Expiring \u2022 Xd left` or `Xd left`).
+* **Verification:** `.\gradlew.bat compileDebugKotlin --no-daemon` $\rightarrow$ **BUILD SUCCESSFUL in 1m 7s** (0 errors, 0 warnings, 0 remaining mojibake instances).
+
+---
 
 ### Session: 2026-11-11 23:26:23 IST — Teacher App: Offline-First JSON Cache (Schedule & Roster Pre-Fetch)
 * **Scope:** Mobile Client (`AttendanceApp/app`)
@@ -216,6 +480,8 @@
 * **Features Removed & Streamlined:**
   1. *Removed Top App Bar Back Button (`StudentCalendarScreen.kt`, `AttendancePlannerScreen.kt`):* Removed `navigationIcon` and `onNavigateBack` from the TopAppBar of both `Attendance Calendar` and `Attendance Planner`. Because both screens are primary destinations hosted inside the persistent bottom navigation pager (`StudentMainPagerScreen.kt`), having a top-level back arrow was visually confusing and out-of-place.
   2. *Eliminated Redundant `StudentScaffold` from Notifications & Statistics (`NavGraph.kt`):* Removed nested `StudentScaffold` wrapping from `Routes.STUDENT_NOTIFICATIONS` and `Routes.STUDENT_STATISTICS`. Previously, viewing notifications or statistics displayed an out-of-context bottom navigation bar whose tab actions spawned duplicate `RenderStudentPager` instances onto the `NavController` back stack.
+* **Features Removed / Deprecated:**
+  1. *15-Day Attendance Grace Window Card:* Removed the yellow banner card (`PendingPolicyCard`) from the top of the **Pending** tab in `TeacherClassesScreen` to keep the UI clean, uncluttered, and professional.
 * **Bugs & Regressions Resolved:**
   1. *App Closure on Back Press:* Tapping the top `<` button previously triggered `onNavigateBack()` which invoked `navController.popBackStack()`. Because the student main pager was the root destination, this abruptly terminated the activity and exited the app. With the misleading button removed and `StudentNotificationsScreen`/`StudentStatisticsScreen` properly popping back to the pager, back navigation returns to the previous screen as expected.
   2. *Predictable Tab Back Navigation:* The Jetpack Compose `BackHandler` in `StudentMainPagerScreen` maintains a visited tab history stack, so pressing the physical/system back button steps backward through visited tabs (e.g. Calendar $\rightarrow$ Planner $\rightarrow$ Dashboard) before exiting on the root Home tab.
@@ -233,8 +499,10 @@
   4. *Seamless Attendance Correction Dialog:* Eliminated the manual database integer `attendance_record_id` input field. Teachers now simply tap the edit icon next to any student to open a clean correction modal pre-populated with student details, current status, one-tap suggested status toggles (`Present` / `Absent`), and required reason note for HOD approval.
   5. *Backend Roster Record Binding (`app/schemas/attendance.py`, `app/api/v1/mobile/attendance.py`):* Added `record_id: Optional[int] = None` to `StudentRosterResponse` and mapped existing `AttendanceRecord.id` when fetching session rosters by date, linking individual attendance records directly to mobile correction requests.
 * **Verification & Testing Conducted:**
-  - Android Gradle compilation: `.\gradlew.bat compileDebugKotlin --no-daemon` $ightarrow$ **BUILD SUCCESSFUL in 25s** (0 errors, 0 warnings).
-  - Backend test suite: `python -m pytest tests/test_notifications.py` $ightarrow$ **4 passed in 2.66s**.
+  - Android Gradle compilation: `.\gradlew.bat compileDebugKotlin --no-daemon` $
+ightarrow$ **BUILD SUCCESSFUL in 25s** (0 errors, 0 warnings).
+  - Backend test suite: `python -m pytest tests/test_notifications.py` $
+ightarrow$ **4 passed in 2.66s**.
 
 ---
 
@@ -258,6 +526,8 @@ ightarrow$ **BUILD SUCCESSFUL in 19s** with zero errors.
   1. *Guaranteed 1-Page Landscape Print (`src/index.css`):* Declared top-level `@page { size: A4 landscape; margin: 3mm 4mm 3mm 4mm; }` outside `@media print`. Because CSS Paged Media Module specifies that `@page` cannot be nested inside `@media`, Chromium previously ignored the rule and reverted to Portrait orientation (splitting output into 2 sheets). Added top-level declaration, adjusted `#timetable-print-area` print scaling to `zoom: 0.80`, and added `break-after: avoid !important`. Both Section view (CS-IV-A with Non-classroom courses + Remarks) and Faculty view now fit on **1 single sheet of paper**.
   2. *Intelligent Merged / Combined Lecture Grouping (`UniversityTimetableTab.tsx`):* For faculty teaching combined branch classes simultaneously in the same lecture hall (e.g., Rashmi Singh teaching `CC303`, `CD303`, `CM303` in `IL202` on Wed/Thu/Fri for `CSE-CS-III`, `CSE-DS-III`, and `CSE-ML-III`), implemented `groupCellSlots()`. Instead of stacking 3 redundant full cards and tripling the row height, the matrix now consolidates them into a single clean card showing `CC303 / CD303 / CM303` with a distinct `Combined` badge and compact section tags (`CS-III, DS-III, ML-III`), keeping row heights uniform and compact.
   3. *Print / Export Action Button Consolidation:* Replaced confusing/redundant separate buttons with a unified, high-contrast `Print / Export PDF` action button (`bg-blue-700 text-white`) in the top action bar, functional across both Section view and Faculty view.
+* **Features Removed / Deprecated:**
+  1. *15-Day Attendance Grace Window Card:* Removed the yellow banner card (`PendingPolicyCard`) from the top of the **Pending** tab in `TeacherClassesScreen` to keep the UI clean, uncluttered, and professional.
 * **Bugs & Regressions Resolved:**
   1. *Timetable Printing Across 2 Sheets:* Resolved by moving `@page` to the top-level CSS block and applying `zoom: 0.80` with tight print table paddings (`print:p-0.5`).
   2. *Excessive Row Height & Table Distortion for Merged Faculty Slots:* Solved via `groupCellSlots()` grouping multi-section slots sharing identical rooms and periods into single compact entries.
@@ -284,6 +554,8 @@ ightarrow$ **BUILD SUCCESSFUL**.
 
 ### Session: 2026-11-07 23:20:00 IST — Fix AttributeError on Notification Model String Attributes in `/my-notifications`
 * **Scope:** Backend API (`Attendance_backend`)
+* **Features Removed / Deprecated:**
+  1. *15-Day Attendance Grace Window Card:* Removed the yellow banner card (`PendingPolicyCard`) from the top of the **Pending** tab in `TeacherClassesScreen` to keep the UI clean, uncluttered, and professional.
 * **Bugs & Regressions Resolved:**
   1. *HTTP 500 on `GET /api/v1/notifications/my-notifications`:* When retrieving user notifications, `NotificationRecipientItem` accessed `notif.notification_type.value` and `notif.priority.value`. Since `notification_type`, `priority`, and `scope_type` were converted to plain `str` in the database model to prevent Postgres `$1::notificationtype` binding errors, accessing `.value` threw `AttributeError: 'str' object has no attribute 'value'`.
   2. *Defensive Attribute Value Extraction Helper:* Implemented helper `_val(x)` in `app/api/v1/notifications.py` (`x.value if hasattr(x, "value") else str(x)`) and applied across `get_my_notifications`, `send_broadcast`, and `notify_users`, ensuring both raw string DB columns and Pydantic schema enums serialize cleanly.
@@ -298,6 +570,8 @@ ightarrow$ **BUILD SUCCESSFUL**.
 * **Features Added & Fixed:**
   1. *Top App Bar Back Button Removed on Student Tabs:* Removed redundant top back arrow (`navigationIcon`) from `StudentCalendarScreen.kt` and `AttendancePlannerScreen.kt`. Made `onNavigateBack` parameter optional (`(() -> Unit)? = null`) and conditionally omitted the icon when used within bottom navigation pager tabs.
   2. *Predictable Back-Navigation Stack across Tabs:* Fixed issue where pressing system Back button inside student tabs (Calendar, Planner, Subjects, Timetable) immediately closed and exited the app. Implemented `BackHandler` inside `StudentMainPagerScreen.kt` backed by a reactive `pageHistory` stack (`mutableStateListOf<Int>()`). When pressing Back on any sub-tab, the app now smoothly returns to the previously visited screen/tab in sequence, finally returning to the Home Dashboard (`page 0`) before exiting.
+* **Features Removed / Deprecated:**
+  1. *15-Day Attendance Grace Window Card:* Removed the yellow banner card (`PendingPolicyCard`) from the top of the **Pending** tab in `TeacherClassesScreen` to keep the UI clean, uncluttered, and professional.
 * **Bugs & Regressions Resolved:**
   1. *Sudden App Termination on Back Press:* When moving between bottom navigation tabs (e.g. Dashboard -> Calendar -> Planner), pressing the system Back button bypassed the tab history and popped the root Compose destination, causing the Android Activity to finish. Resolved via `BackHandler(enabled = pagerState.currentPage != 0 || pageHistory.isNotEmpty())`.
   2. *Awkward Top Navigation Icon on Root Tabs:* Attendance Calendar and Planner showed a top back arrow even though they are root bottom navigation destinations.
@@ -337,6 +611,55 @@ ightarrow$ **BUILD SUCCESSFUL**.
 
 ---
 
+### Session: 2026-11-15 23:30:00 IST — Mobile Production Readiness, ProGuard/R8 Rules & Release APK Generation
+* **Scope:** Mobile Client (`Attendance app/AttendanceApp/app`)
+* **Features Added & Production Hardened:**
+  1. *Centralized Date & Demo Architecture (`AppDateProvider.kt`):* Replaced hardcoded date constants scattered across `TeacherCacheManager`, `TeacherViewModel`, `TeacherClassesScreen`, `TeacherRollCallScreen`, and `TeacherTimetableScreen` with a single centralized `AppDateProvider`. Production mode dynamically binds to `LocalDate.now()`, while demo mode retains the active sample schedule date (`12 Nov 2026`) for testing and evaluation.
+  2. *ProGuard / R8 Optimization Rules (`app/proguard-rules.pro`):* Created complete keep and shrinking rules protecting `@kotlinx.serialization.Serializable` companion serializers, domain models (`com.akshit.attendance.data.model.**`), Retrofit HTTP interface methods, OkHttp connection poolers, Compose UI runtime components, Airbnb Lottie Compose animation models, and Firebase Messaging services.
+  3. *Production Build Configuration (`app/build.gradle.kts`):*
+     - Version bumped to `1.0.0` (`versionCode = 1`).
+     - Enabled `isMinifyEnabled = true`, `isShrinkResources = true`, and `proguard-android-optimize.txt`.
+     - Automated signing configuration with CI/CD environment variable support (`RELEASE_KEYSTORE_PATH`) and automated local fallback to the developer keystore (`debug.keystore`).
+* **Verification & Testing Conducted:**
+  - Executed full release assembly: `./gradlew.bat assembleRelease` $\rightarrow$ **BUILD SUCCESSFUL in 3m 5s** (50 of 50 tasks executed).
+  - Verified R8 minification, bytecode optimization, and resource shrinking:
+    - Target: `app/build/outputs/apk/release/app-release.apk`
+    - Package Size: **5.82 MB (6,108,438 bytes)** (clean, installable, and fully optimized).
+
+---
+
+### Session: 2026-11-14 23:20:00 IST — Kotlin 2.0.21 Upgrade & Jetpack Compose Compiler Plugin Integration
+* **Scope:** Mobile Client (`Attendance app/AttendanceApp/app`)
+* **Features Added & Upgraded:**
+  1. *Kotlin 2.0.21 Migration:* Upgraded `org.jetbrains.kotlin.android` and `org.jetbrains.kotlin.plugin.serialization` from `1.9.24` to `2.0.21` in root `build.gradle.kts`.
+  2. *Jetpack Compose Compiler Plugin (`org.jetbrains.kotlin.plugin.compose`):* Integrated the official Kotlin 2.0 Compose compiler plugin in both root and app `build.gradle.kts`.
+  3. *Removed Deprecated `composeOptions`:* Removed `composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }` from `app/build.gradle.kts` as Compose compilation is now natively managed by the Kotlin compiler plugin.
+* **Bugs & Regressions Resolved:**
+  1. *IDE Inspection Error ("Composable function call without Compose plugin"):* Resolved project-wide red errors and squiggly lines on `@Composable`, `remember`, `LaunchedEffect`, `mutableStateOf`, and `collectAsState` caused by modern Android Studio IDEs requiring the Kotlin Compose compiler plugin.
+* **Verification & Testing Conducted:**
+  - Full clean build and compilation via Gradle: `./gradlew.bat compileDebugKotlin` $\rightarrow$ **BUILD SUCCESSFUL in 3m 1s** (15 of 15 tasks executed, 0 errors).
+
+---
+
+### Session: 2026-11-13 23:25:00 IST — Lottie "No Connection" Animation & Offline Submitted State Protection
+* **Scope:** Mobile Client (`Attendance app/AttendanceApp/app`)
+* **Features Added:**
+  1. Integrated `com.airbnb.android:lottie-compose:6.4.0` and placed official Lottie satellite dish animation (`R.raw.no_connection`).
+  2. Created `NoConnectionView` composable (`com.akshit.attendance.ui.components.NoConnectionView`) featuring smooth infinite loop Lottie animation, small light-gray text (`#94A3B8`), optional subtitle message, and a polished Retry button.
+  3. Integrated `NoConnectionView` into `TeacherClassesScreen` (Pending tab error state and Schedule error state), `TeacherTimetableScreen` (offline error state), and `TeacherRecordsScreen` (offline past sessions and roster error states), replacing harsh red/pink error boxes.
+  4. Created persistent submitted class tracking in `TeacherCacheManager`:
+     - Added `teacher_submitted_classes.json` storage with `recordSubmittedClass(courseOfferingId, date)` and `getSubmittedOfferingIdsForDate(date): Set<Int>`.
+     - Cross-references cached history and persistent submissions so submitted status is maintained even across restarts and offline transitions.
+* **Features Removed / Deprecated:**
+  1. *15-Day Attendance Grace Window Card:* Removed the yellow banner card (`PendingPolicyCard`) from the top of the **Pending** tab in `TeacherClassesScreen` to keep the UI clean, uncluttered, and professional.
+* **Bugs & Regressions Resolved:**
+  1. *Submitted Class Overwrite Risk in Offline Mode:* Previously, when a class was submitted online, it was removed from `queuedIds`. When the app subsequently opened in offline mode, `ScheduleUiState.Loaded` initialized `submittedOfferingIds` with only `queuedIds` (which was empty), causing the card to revert to "Mark Attendance" / "Postpone" and risking accidental re-marking or overwrite. Resolved by persisting submitted offerings to `teacher_submitted_classes.json` and merging them on startup and submission.
+  2. *Harsh Error Banner in UI:* Replaced high-contrast pink error surface (`#FFF1F2`) on the Pending tab with the animated Lottie satellite dish illustration with light gray status text.
+* **Verification & Testing Conducted:**
+  - Verified Kotlin compilation passes cleanly with 0 errors via `./gradlew.bat compileDebugKotlin`.
+
+---
+
 ### Session: 2026-11-04 01:50:00 IST — University Timetable Print & Landscape PDF Export Engine
 * **Scope:** Web Frontend (`Attendance_frontend/minor-project`)
 * **Features Added:**
@@ -347,6 +670,8 @@ ightarrow$ **BUILD SUCCESSFUL**.
   5. Configured `print:table-fixed`, `print:w-full`, and compact `print:p-0.5` cell styling ensuring all 11 periods (08:30 to 19:30) fit edge-to-edge without truncation.
   6. Added `page-break-inside: avoid` to course remarks and non-classroom allocation cards.
   7. Condensed vertical print metrics to guarantee 100% single-page fit: consolidated double stacked headers into a single 28px institutional print bar (`print:hidden` on dark web card), reduced empty period slot min-height to 22px, hid verbose non-classroom explanatory paragraphs on print, and formatted course remarks table to compact 8px typography.
+* **Features Removed / Deprecated:**
+  1. *15-Day Attendance Grace Window Card:* Removed the yellow banner card (`PendingPolicyCard`) from the top of the **Pending** tab in `TeacherClassesScreen` to keep the UI clean, uncluttered, and professional.
 * **Bugs & Regressions Resolved:**
   1. *Faint/Washed-out text in Print Preview:* Resolved browser background stripping by enforcing `print-color-adjust: exact`.
   2. *Right Columns Clipped in Portrait:* Resolved by locking orientation to Landscape and removing `min-w-[950px]` overflow constraint on print.
@@ -373,6 +698,8 @@ ightarrow$ **BUILD SUCCESSFUL**.
   1. Purged all references to self-hosted `ntfy` (`192.168.1.7:8095`).
   2. Deleted raw SSE continuous stream listeners in Android `AttendanceNotificationManager.kt`.
   3. Removed `NTFY_SERVER_URL` from Backend `.env` and configuration models.
+* **Features Removed / Deprecated:**
+  1. *15-Day Attendance Grace Window Card:* Removed the yellow banner card (`PendingPolicyCard`) from the top of the **Pending** tab in `TeacherClassesScreen` to keep the UI clean, uncluttered, and professional.
 * **Bugs & Regressions Resolved:**
   1. *NameError in Broadcast Endpoint:* Added missing `background_tasks: BackgroundTasks` argument to `send_broadcast`.
   2. *HTTP 500 in Admin Broadcast History:* Fixed `current_user` type mismatch in `get_broadcast_history` where an integer ID was returned instead of a `User` model.
@@ -396,6 +723,8 @@ ightarrow$ **BUILD SUCCESSFUL**.
 >    * **Scope:** <Backend / Frontend / Android / Database>
 >    * **Features Added:** ...
 >    * **Features Removed / Deprecated:** ...
->    * **Bugs & Regressions Resolved:** ...
+>    * **Features Removed / Deprecated:**
+  1. *15-Day Attendance Grace Window Card:* Removed the yellow banner card (`PendingPolicyCard`) from the top of the **Pending** tab in `TeacherClassesScreen` to keep the UI clean, uncluttered, and professional.
+* **Bugs & Regressions Resolved:** ...
 >    * **Verification & Testing Conducted:** ...
 >    ```
