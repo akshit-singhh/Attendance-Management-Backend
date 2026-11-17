@@ -1,7 +1,8 @@
-import os
+
 import uuid
-import shutil
+import logging
 from datetime import date
+from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -12,7 +13,15 @@ from app.models.attendance import LeaveRequest, LeaveStatus
 router = APIRouter()
 
 # Matches the static directory we mounted in main.py
-UPLOAD_DIR = "uploads"
+UPLOAD_DIR = Path("uploads")
+MAX_DOCUMENT_BYTES = 10 * 1024 * 1024
+ALLOWED_DOCUMENTS = {
+    ".pdf": {"application/pdf"},
+    ".jpg": {"image/jpeg"},
+    ".jpeg": {"image/jpeg"},
+    ".png": {"image/png"},
+}
+logger = logging.getLogger(__name__)
 
 @router.post("/apply", status_code=status.HTTP_201_CREATED)
 async def apply_for_leave(
@@ -29,16 +38,44 @@ async def apply_for_leave(
     if start_date > end_date:
         raise HTTPException(status_code=400, detail="Start date cannot be after end date.")
         
-    # 1. Secure and save the uploaded file
-    file_extension = document.filename.split(".")[-1] if "." in document.filename else "jpg"
-    secure_filename = f"{uuid.uuid4()}.{file_extension}"
-    file_path = os.path.join(UPLOAD_DIR, secure_filename)
+    # Use an allowlisted extension and MIME type; never trust the client filename.
+    file_extension = Path(document.filename or "").suffix.lower()
+    allowed_mime_types = ALLOWED_DOCUMENTS.get(file_extension)
+    if not allowed_mime_types or document.content_type not in allowed_mime_types:
+        raise HTTPException(status_code=400, detail="Upload a PDF, JPEG, or PNG document.")
+
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    secure_filename = f"{uuid.uuid4().hex}{file_extension}"
+    file_path = UPLOAD_DIR / secure_filename
+    total_bytes = 0
+    header = bytearray()
     
     try:
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(document.file, buffer)
-    except Exception as e:
+        with file_path.open("wb") as buffer:
+            while chunk := await document.read(64 * 1024):
+                total_bytes += len(chunk)
+                if total_bytes > MAX_DOCUMENT_BYTES:
+                    raise HTTPException(status_code=413, detail="Document must be 10 MB or smaller.")
+                if len(header) < 8:
+                    header.extend(chunk[: 8 - len(header)])
+                buffer.write(chunk)
+        signatures = {
+            ".pdf": bytes(header).startswith(b"%PDF-"),
+            ".jpg": bytes(header).startswith(b"\xff\xd8\xff"),
+            ".jpeg": bytes(header).startswith(b"\xff\xd8\xff"),
+            ".png": bytes(header).startswith(b"\x89PNG\r\n\x1a\n"),
+        }
+        if total_bytes == 0 or not signatures[file_extension]:
+            raise HTTPException(status_code=400, detail="The uploaded document is empty or its contents do not match its file type.")
+    except HTTPException:
+        file_path.unlink(missing_ok=True)
+        raise
+    except OSError:
+        logger.exception("Failed to save leave document")
+        file_path.unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail="Failed to save document to server.")
+    finally:
+        await document.close()
         
     # 2. Construct the public URL for the React dashboard
     document_url = f"/static/uploads/{secure_filename}"
@@ -53,9 +90,15 @@ async def apply_for_leave(
         status=LeaveStatus.PENDING
     )
     
-    db.add(leave_request)
-    await db.commit()
-    await db.refresh(leave_request)
+    try:
+        db.add(leave_request)
+        await db.commit()
+        await db.refresh(leave_request)
+    except Exception:
+        await db.rollback()
+        file_path.unlink(missing_ok=True)
+        logger.exception("Failed to persist leave request; removed uploaded document")
+        raise HTTPException(status_code=500, detail="Failed to submit leave request.")
     
     return {
         "status": "success", 

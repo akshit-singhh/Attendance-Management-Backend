@@ -294,7 +294,7 @@ DATABASE_URL=postgresql+asyncpg://postgres:password@localhost:5432/attendance_db
 # Security & Tokens
 SECRET_KEY=your-super-secret-key-32-chars-minimum
 ALGORITHM=HS256
-ACCESS_TOKEN_EXPIRE_MINUTES=1440
+ACCESS_TOKEN_EXPIRE_MINUTES=15
 REFRESH_TOKEN_EXPIRE_DAYS=60
 
 # Initial Admin Setup

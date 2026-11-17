@@ -67,3 +67,11 @@ class PasswordResetOTP(SQLModel, table=True):
     email: str = Field(index=True)
     otp_code: str
     expires_at: datetime
+    failed_attempts: int = Field(default=0)
+
+
+class AuthRateLimit(SQLModel, table=True):
+    """Persistent fixed-window counters shared across backend instances."""
+    key: str = Field(primary_key=True, max_length=64)
+    window_started_at: datetime
+    attempt_count: int = Field(default=1)

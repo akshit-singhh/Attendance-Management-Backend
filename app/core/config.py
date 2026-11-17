@@ -9,7 +9,7 @@ class Settings(BaseSettings):
     # Security
     SECRET_KEY: str # MUST be set in .env
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 15 # 15 days
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15 # Short access-token lifetime; clients refresh using refresh tokens.
     REFRESH_TOKEN_EXPIRE_DAYS: int = 60 # 60 days (sliding session on refresh)
     
     # Initial Admin Credentials (MUST be set in .env)

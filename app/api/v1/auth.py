@@ -1,8 +1,10 @@
-import random
+import hashlib
+import hmac
+import secrets
 from datetime import datetime, timedelta
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Request
 from sqlmodel.ext.asyncio.session import AsyncSession
 from sqlmodel import select, delete, func
 from sqlalchemy import case
@@ -16,6 +18,7 @@ from app.models.academic import CourseOffering, TimetableEntry, Batch, Programme
 from app.models.attendance import AttendanceRecord, AttendanceSession, SessionStatus, AttendanceStatus
 from app.api.deps import get_current_user
 from app.services.email_service import send_otp_email
+from app.core.rate_limit import enforce_auth_limit
 
 # Import schemas from app.schemas.auth
 from app.schemas.auth import (
@@ -31,12 +34,28 @@ from app.schemas.auth import (
 
 router = APIRouter()
 
+
+def _token_digest(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _otp_digest(otp: str) -> str:
+    return hmac.new(settings.SECRET_KEY.encode("utf-8"), otp.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _request_ip(request: Request) -> str:
+    # Do not trust forwarded headers unless a trusted proxy policy is configured.
+    return request.client.host if request.client else "unknown"
+
 @router.post("/login", response_model=TokenResponse)
 async def login(
     payload: LoginRequest,
+    request: Request,
     db: AsyncSession = Depends(get_session)
 ):
     identifier = payload.email.strip()
+    await enforce_auth_limit(db, "login-ip", _request_ip(request), 20)
+    await enforce_auth_limit(db, "login-identity", identifier.lower(), 10)
 
     # 1. Search User by email (case-insensitive)
     statement = (
@@ -103,7 +122,7 @@ async def login(
 
     db_refresh_token = RefreshToken(
         user_id=user.id,
-        token=refresh_token_str,
+        token=_token_digest(refresh_token_str),
         expires_at=expires_at
     )
 
@@ -126,7 +145,9 @@ async def refresh_token(
     request: RefreshTokenRequest,
     db: AsyncSession = Depends(get_session)
 ):
-    statement = select(RefreshToken).where(RefreshToken.token == request.refresh_token)
+    statement = select(RefreshToken).where(
+        RefreshToken.token == _token_digest(request.refresh_token)
+    ).with_for_update()
     result = await db.exec(statement)
     db_token = result.first()
 
@@ -171,7 +192,7 @@ async def refresh_token(
 
     new_db_token = RefreshToken(
         user_id=user.id,
-        token=new_refresh_token_str,
+        token=_token_digest(new_refresh_token_str),
         expires_at=expires_at
     )
 
@@ -194,7 +215,9 @@ async def logout(
     request: RefreshTokenRequest,
     db: AsyncSession = Depends(get_session)
 ):
-    statement = select(RefreshToken).where(RefreshToken.token == request.refresh_token)
+    statement = select(RefreshToken).where(
+        RefreshToken.token == _token_digest(request.refresh_token)
+    )
     result = await db.exec(statement)
     db_token = result.first()
 
@@ -228,9 +251,12 @@ async def change_password(
 async def forgot_password(
     payload: ForgotPasswordRequest,
     background_tasks: BackgroundTasks,
+    request: Request,
     db: AsyncSession = Depends(get_session)
 ):
     identifier = payload.email.strip()
+    await enforce_auth_limit(db, "forgot-ip", _request_ip(request), 10)
+    await enforce_auth_limit(db, "forgot-identity", identifier.lower(), 3)
     user_stmt = select(User).where(func.lower(User.email) == identifier.lower())
     user = (await db.exec(user_stmt)).first()
 
@@ -250,12 +276,16 @@ async def forgot_password(
         return {"status": "success", "message": "If that account exists, an OTP has been sent."}
 
     target_email = user.email
-    otp_code = str(random.randint(100000, 999999))
+    otp_code = f"{secrets.randbelow(1_000_000):06d}"
     expires_at = datetime.utcnow() + timedelta(minutes=5)
 
     await db.exec(delete(PasswordResetOTP).where(PasswordResetOTP.email == target_email))
 
-    db_otp = PasswordResetOTP(email=target_email, otp_code=otp_code, expires_at=expires_at)
+    db_otp = PasswordResetOTP(
+        email=target_email,
+        otp_code=_otp_digest(otp_code),
+        expires_at=expires_at,
+    )
     db.add(db_otp)
     await db.commit()
 
@@ -266,9 +296,12 @@ async def forgot_password(
 @router.post("/reset-password", status_code=status.HTTP_200_OK)
 async def reset_password(
     payload: ResetPasswordRequest,
+    request: Request,
     db: AsyncSession = Depends(get_session)
 ):
     identifier = payload.email.strip()
+    await enforce_auth_limit(db, "reset-ip", _request_ip(request), 15)
+    await enforce_auth_limit(db, "reset-identity", identifier.lower(), 8)
     target_email = identifier
 
     if "@" not in identifier:
@@ -286,13 +319,18 @@ async def reset_password(
             target_email = found_user.email
 
     otp_stmt = select(PasswordResetOTP).where(
-        (func.lower(PasswordResetOTP.email) == target_email.lower()) &
-        (PasswordResetOTP.otp_code == payload.otp)
-    )
-
+        func.lower(PasswordResetOTP.email) == target_email.lower()
+    ).with_for_update()
     db_otp = (await db.exec(otp_stmt)).first()
 
-    if not db_otp:
+    if not db_otp or not hmac.compare_digest(db_otp.otp_code, _otp_digest(payload.otp)):
+        if db_otp:
+            db_otp.failed_attempts += 1
+            if db_otp.failed_attempts >= 8:
+                await db.delete(db_otp)
+            else:
+                db.add(db_otp)
+            await db.commit()
         raise HTTPException(status_code=400, detail="Invalid or expired OTP.")
 
     if db_otp.expires_at < datetime.utcnow():
@@ -339,7 +377,7 @@ async def switch_role(
 
     expires_at = datetime.utcnow() + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS)
 
-    db.add(RefreshToken(user_id=current_user.id, token=new_refresh_token_str, expires_at=expires_at))
+    db.add(RefreshToken(user_id=current_user.id, token=_token_digest(new_refresh_token_str), expires_at=expires_at))
     await db.commit()
 
     available_roles = [

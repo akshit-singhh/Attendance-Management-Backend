@@ -17,7 +17,7 @@ load_dotenv()
 
 # 3. Import SQLModel and ALL your model files
 from sqlmodel import SQLModel
-from app.models.user import User, StudentProfile, PasswordResetOTP, RefreshToken, RoleAssignment
+from app.models.user import User, StudentProfile, PasswordResetOTP, RefreshToken, RoleAssignment, AuthRateLimit
 from app.models.academic import (
     School, Department, Programme, Specialization, Batch, AcademicTerm,
     Section, Subject, CourseOffering, StudentSubjectMap, SubstituteGrant, TimetableEntry

