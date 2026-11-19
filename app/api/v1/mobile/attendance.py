@@ -1,9 +1,11 @@
 import logging
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Query
+from pydantic import BaseModel
 from sqlmodel.ext.asyncio.session import AsyncSession
-from sqlmodel import select
+from sqlmodel import select, func, or_
 from typing import List, Optional
 from datetime import date, datetime, timezone, timedelta
+import math
 import uuid
 from sqlalchemy.exc import IntegrityError
 
@@ -14,6 +16,7 @@ from app.models.academic import CourseOffering, Subject, Section, StudentSubject
 from app.models.attendance import (
     AttendanceSession,
     AttendanceRecord,
+    AttendanceStatus,
     SessionMode,
     SessionStatus,
     CorrectionRequest, 
@@ -26,6 +29,7 @@ from app.schemas.attendance import (
     SessionHistoryResponse,
     PendingClassResponse,
     PostponeClassRequest,
+    StudentAttendanceSummaryResponse,
 )
 from app.schemas.corrections import CorrectionRequestCreate
 from app.api.v1.notifications import notify_users
@@ -33,6 +37,71 @@ from app.api.v1.notifications import notify_users
 logger = logging.getLogger("attendance.notifications")
 
 router = APIRouter()
+
+
+def merge_consecutive_schedule_slots(items: List[CourseScheduleResponse]) -> List[CourseScheduleResponse]:
+    """
+    Merges contiguous slots that belong to the same course offering and section.
+    For example: a 2-hour lab from 11:30-12:30 and 12:30-13:30 merges into
+    11:30-13:30 with duration_periods = 2.
+    """
+    if not items:
+        return []
+
+    # Sort primarily by course_offering_id and start_time to easily detect consecutive blocks
+    sorted_items = sorted(items, key=lambda x: (x.course_offering_id, x.start_time))
+    merged: List[CourseScheduleResponse] = []
+
+    for item in sorted_items:
+        if (
+            merged
+            and merged[-1].course_offering_id == item.course_offering_id
+            and (merged[-1].batch_label or "") == (item.batch_label or "")
+            and merged[-1].end_time == item.start_time
+        ):
+            # Contiguous timeslot of the same course offering: extend end_time and increment duration_periods
+            merged[-1].end_time = item.end_time
+            merged[-1].duration_periods = (merged[-1].duration_periods or 1) + (item.duration_periods or 1)
+            if not merged[-1].room and item.room:
+                merged[-1].room = item.room
+        else:
+            merged.append(item)
+
+    # Sort final merged schedule chronologically by start_time
+    merged.sort(key=lambda x: x.start_time)
+    return merged
+
+
+def merge_consecutive_pending_classes(items: List[PendingClassResponse]) -> List[PendingClassResponse]:
+    """
+    Merges contiguous slots on the same date for the same course offering into a single pending session.
+    """
+    if not items:
+        return []
+
+    # Group and sort by date, course_offering_id, start_time
+    sorted_items = sorted(items, key=lambda x: (x.date, x.course_offering_id, x.start_time))
+    merged: List[PendingClassResponse] = []
+
+    for item in sorted_items:
+        if (
+            merged
+            and merged[-1].date == item.date
+            and merged[-1].course_offering_id == item.course_offering_id
+            and (merged[-1].batch_label or "") == (item.batch_label or "")
+            and merged[-1].end_time == item.start_time
+        ):
+            merged[-1].end_time = item.end_time
+            merged[-1].duration_periods = (merged[-1].duration_periods or 1) + (item.duration_periods or 1)
+            if not merged[-1].room and item.room:
+                merged[-1].room = item.room
+        else:
+            merged.append(item)
+
+    # Sort newest date first, then by start_time
+    merged.sort(key=lambda x: (x.date, x.start_time), reverse=True)
+    return merged
+
 
 @router.get("/schedule", response_model=List[CourseScheduleResponse])
 async def get_daily_schedule(
@@ -90,9 +159,12 @@ async def get_daily_schedule(
             credits=subject.credits or 3,
             course_type=offering.course_type or subject.course_type or "LECTURE",
             weekly_hours=offering.weekly_hours,
+            duration_periods=1,
+            batch_label=timetable_entry.batch_label,
+            day_of_week=timetable_entry.day_of_week.value if hasattr(timetable_entry.day_of_week, "value") else str(timetable_entry.day_of_week),
         ))
         
-    return schedule
+    return merge_consecutive_schedule_slots(schedule)
 
 
 @router.get("/pending", response_model=List[PendingClassResponse])
@@ -133,8 +205,8 @@ async def get_pending_classes(
     now = datetime.now()
     today = now.date()
 
-    # Pre-fetch existing attendance sessions for these offerings over the last 16 days
-    min_date = today - timedelta(days=16)
+    # Pre-fetch existing attendance sessions for these offerings over past 60 days
+    min_date = today - timedelta(days=60)
     offering_ids = [co.id for co, _, _, _ in all_tts]
     existing_sessions = set()
     if offering_ids:
@@ -147,8 +219,8 @@ async def get_pending_classes(
             existing_sessions.add((row[0], row[1]))
 
     pending = []
-    # Check each day in the 15-day grace window (day_offset 0 to 14)
-    for day_offset in range(15):
+    # Check past 60 days for unmarked past sessions
+    for day_offset in range(60):
         target_date = today - timedelta(days=day_offset)
         weekday = target_date.weekday()
         if weekday not in DAY_OF_WEEK_MAP:
@@ -167,7 +239,6 @@ async def get_pending_classes(
             if (co.id, target_date) in existing_sessions:
                 continue
 
-            days_remaining = 15 - day_offset
             pending.append(PendingClassResponse(
                 course_offering_id=co.id,
                 subject_name=sub.name,
@@ -179,13 +250,13 @@ async def get_pending_classes(
                 start_time=tte.start_time.strftime("%H:%M:%S"),
                 end_time=tte.end_time.strftime("%H:%M:%S"),
                 room=tte.room or "TBA",
-                days_remaining=days_remaining,
-                is_expiring_soon=(days_remaining <= 3),
+                days_remaining=0,
+                is_expiring_soon=False,
+                duration_periods=1,
+                batch_label=tte.batch_label,
             ))
 
-    # Sort: newest date to oldest date, then by class start_time
-    pending.sort(key=lambda x: (x.date, x.start_time), reverse=True)
-    return pending
+    return merge_consecutive_pending_classes(pending)
 
 
 @router.get("/roster/{course_offering_id}", response_model=List[StudentRosterResponse])
@@ -193,6 +264,7 @@ async def get_class_roster(
     course_offering_id: int,
     session_date: Optional[date] = None,
     date: Optional[date] = None,
+    batch_label: Optional[str] = None,
     teacher_id: int = Depends(require_teacher),
     db: AsyncSession = Depends(get_session)
 ):
@@ -211,45 +283,69 @@ async def get_class_roster(
     target_date = session_date or date
     status_map = {}
     if target_date:
+        sess_conds = [
+            AttendanceSession.course_offering_id == course_offering_id,
+            AttendanceSession.date == target_date,
+            AttendanceSession.is_held == True
+        ]
+        if batch_label:
+            norm = batch_label.replace("-", "").strip().upper()
+            sess_conds.append(
+                or_(
+                    AttendanceSession.batch_label == batch_label,
+                    func.replace(func.coalesce(AttendanceSession.batch_label, ""), "-", "") == norm
+                )
+            )
         session_stmt = (
             select(AttendanceSession)
-            .where(
-                AttendanceSession.course_offering_id == course_offering_id,
-                AttendanceSession.date == target_date,
-                AttendanceSession.is_held == True
-            )
+            .where(*sess_conds)
             .order_by(AttendanceSession.id.desc())
         )
-        existing_session = (await db.exec(session_stmt)).first()
-        if existing_session:
-            rec_stmt = select(AttendanceRecord).where(AttendanceRecord.session_id == existing_session.id)
+        existing_sessions = (await db.exec(session_stmt)).all()
+        for sess in existing_sessions:
+            rec_stmt = select(AttendanceRecord).where(AttendanceRecord.session_id == sess.id)
             existing_records = (await db.exec(rec_stmt)).all()
             for r in existing_records:
                 status_map[r.student_id] = (r.status, r.id)
 
     statement = (
-        select(User, StudentProfile)
+        select(User, StudentProfile, StudentSubjectMap)
         .join(StudentProfile, User.id == StudentProfile.user_id)
         .join(StudentSubjectMap, User.id == StudentSubjectMap.student_id)
         .where(StudentSubjectMap.course_offering_id == course_offering_id)
         .order_by(StudentProfile.roll_number.asc(), User.full_name.asc())
     )
     
-    results = await db.exec(statement)
-    
+    results = (await db.exec(statement)).all()
+    total_students = len(results)
+    half = (total_students + 1) // 2
+
     roster = []
-    for user, profile in results:
+    has_unassigned = False
+    for idx, (user, profile, ssm) in enumerate(results):
         rec_data = status_map.get(user.id)
         stat_val = rec_data[0] if isinstance(rec_data, tuple) else rec_data
         rec_id = rec_data[1] if isinstance(rec_data, tuple) else None
+
+        group = ssm.lab_group
+        if not group:
+            group = "G1" if idx < half else "G2"
+            ssm.lab_group = group
+            db.add(ssm)
+            has_unassigned = True
+
         roster.append(StudentRosterResponse(
             student_id=user.id,
             roll_number=profile.roll_number,
             full_name=user.full_name,
             status=stat_val,
-            record_id=rec_id
+            record_id=rec_id,
+            lab_group=group
         ))
         
+    if has_unassigned:
+        await db.commit()
+
     return roster
 
 
@@ -261,14 +357,6 @@ async def sync_offline_attendance(
     db: AsyncSession = Depends(get_session)
 ):
     """Idempotent endpoint for synchronizing offline attendance captures."""
-    
-    # 0. 15-Day Attendance Marking Window Enforcement
-    days_since_class = (datetime.now().date() - payload.date).days
-    if days_since_class > 15:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Attendance window expired: cannot submit attendance for a class conducted {days_since_class} days ago (limit is 15 days)."
-        )
     
     # 1. Idempotency Check (Session Level)
     existing_session_stmt = select(AttendanceSession).where(AttendanceSession.session_uuid == payload.session_uuid)
@@ -307,14 +395,24 @@ async def sync_offline_attendance(
                 detail="Not authorized to sync this session. Assignment removed or substitute grant expired."
             )
 
-    # 3. Check for existing session on the same date and class (to allow direct edits/updates)
+    # 3. Check for existing session on the same date, class, and batch (to allow direct edits/updates)
+    dup_conditions = [
+        AttendanceSession.course_offering_id == payload.course_offering_id,
+        AttendanceSession.date == payload.date,
+        AttendanceSession.is_held == True
+    ]
+    if payload.batch_label:
+        norm = payload.batch_label.replace("-", "").strip().upper()
+        dup_conditions.append(
+            or_(
+                AttendanceSession.batch_label == payload.batch_label,
+                func.replace(func.coalesce(AttendanceSession.batch_label, ""), "-", "") == norm
+            )
+        )
+
     duplicate_check_stmt = (
         select(AttendanceSession)
-        .where(
-            AttendanceSession.course_offering_id == payload.course_offering_id,
-            AttendanceSession.date == payload.date,
-            AttendanceSession.is_held == True
-        )
+        .where(*dup_conditions)
         .order_by(AttendanceSession.id.desc())
     )
     existing_session = (await db.exec(duplicate_check_stmt)).first()
@@ -332,6 +430,7 @@ async def sync_offline_attendance(
         target_session.mode = payload.mode
         target_session.is_held = payload.is_held
         target_session.reason_not_held = payload.reason_not_held
+        target_session.batch_label = payload.batch_label
         target_session.status = SessionStatus.SUBMITTED
         target_session.submitted_at = datetime.utcnow()
         db.add(target_session)
@@ -356,6 +455,7 @@ async def sync_offline_attendance(
             mode=payload.mode,
             is_held=payload.is_held,
             reason_not_held=payload.reason_not_held,
+            batch_label=payload.batch_label,
             status=SessionStatus.SUBMITTED,
             submitted_at=datetime.utcnow()
         )
@@ -409,6 +509,55 @@ async def sync_offline_attendance(
     await db.commit()
     created_session_id = new_session.id
 
+    # 7. Smart Weekly Auto-Fulfillment for Combined Labs (Approach B)
+    if payload.batch_label in ("ALL", "COMBINED") or len(payload.records) >= len(enrolled_students):
+        try:
+            week_start = payload.date - timedelta(days=payload.date.weekday())
+            other_tt_stmt = select(TimetableEntry).where(
+                TimetableEntry.course_offering_id == payload.course_offering_id
+            )
+            other_entries = (await db.exec(other_tt_stmt)).all()
+
+            DOW_OFFSET = {
+                DayOfWeek.MON: 0,
+                DayOfWeek.TUE: 1,
+                DayOfWeek.WED: 2,
+                DayOfWeek.THU: 3,
+                DayOfWeek.FRI: 4,
+                DayOfWeek.SAT: 5,
+            }
+
+            for o_tte in other_entries:
+                slot_offset = DOW_OFFSET.get(o_tte.day_of_week)
+                if slot_offset is None:
+                    continue
+                slot_date = week_start + timedelta(days=slot_offset)
+                if slot_date != payload.date:
+                    exist_other_stmt = select(AttendanceSession).where(
+                        AttendanceSession.course_offering_id == payload.course_offering_id,
+                        AttendanceSession.date == slot_date
+                    )
+                    exist_other = (await db.exec(exist_other_stmt)).first()
+                    if not exist_other:
+                        combined_placeholder = AttendanceSession(
+                            session_uuid=str(uuid.uuid4()),
+                            course_offering_id=payload.course_offering_id,
+                            teacher_id=teacher_id,
+                            date=slot_date,
+                            duration_periods=payload.duration_periods,
+                            mode=SessionMode.MANUAL,
+                            is_held=False,
+                            reason_not_held=f"Combined Lab conducted on {payload.date.strftime('%a, %d %b')}",
+                            batch_label="COMBINED",
+                            status=SessionStatus.SUBMITTED,
+                            submitted_at=datetime.utcnow()
+                        )
+                        db.add(combined_placeholder)
+                        await db.commit()
+                        logger.info(f"Auto-fulfilled slot on {slot_date} for combined lab on {payload.date}")
+        except Exception as e:
+            logger.warning(f"Error in weekly lab auto-fulfillment: {e}")
+
     # Dispatch student push notifications in background for ABSENT / LEAVE
     try:
         subject = await db.get(Subject, offering.subject_id)
@@ -455,6 +604,7 @@ async def get_teacher_history(
         select(
             AttendanceSession.course_offering_id,
             AttendanceSession.date,
+            AttendanceSession.batch_label,
             Subject.name.label("subject_name"),
             Section.name.label("section_name")
         )
@@ -474,7 +624,8 @@ async def get_teacher_history(
             course_offering_id=row.course_offering_id,
             date=row.date,
             subject_name=row.subject_name,
-            section_name=row.section_name
+            section_name=row.section_name,
+            batch_label=row.batch_label
         ))
         
     return history
@@ -532,15 +683,7 @@ async def postpone_class(
     db: AsyncSession = Depends(get_session)
 ):
     """Postpone or mark a class not held for a specific date, notifying enrolled students."""
-    # 1. 15-day limit check for past dates
-    days_diff = (datetime.now().date() - payload.date).days
-    if days_diff > 15:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Attendance window expired: cannot postpone a class from {days_diff} days ago (limit is 15 days)."
-        )
-
-    # 2. Authorization check
+    # 1. Authorization check
     offering = await db.get(CourseOffering, payload.course_offering_id)
     if not offering:
         raise HTTPException(status_code=404, detail="Course offering not found.")
@@ -586,7 +729,7 @@ async def postpone_class(
             course_offering_id=payload.course_offering_id,
             teacher_id=teacher_id,
             date=payload.date,
-            duration_periods=1,
+            duration_periods=getattr(payload, "duration_periods", 1) or 1,
             mode=SessionMode.MANUAL,
             is_held=False,
             reason_not_held=reason,
@@ -631,3 +774,153 @@ async def postpone_class(
         "status": "success",
         "message": f"Class on {payload.date.strftime('%a, %d %b')} has been postponed."
     }
+
+
+@router.get("/course/{course_offering_id}/students-summary", response_model=List[StudentAttendanceSummaryResponse])
+async def get_course_students_summary(
+    course_offering_id: int,
+    threshold: Optional[float] = None,
+    teacher_id: int = Depends(require_teacher),
+    db: AsyncSession = Depends(get_session)
+):
+    """
+    Fetch aggregated student attendance percentages for a specific course offering.
+    Optionally filters students whose attendance percentage is strictly below `threshold` (e.g. 75.0, 50.0).
+    """
+    teacher = await db.get(User, teacher_id)
+    matched_teacher_ids = [teacher_id]
+    if teacher:
+        same_name_ids = (await db.exec(select(User.id).where(User.full_name == teacher.full_name))).all()
+        matched_teacher_ids = list(set(matched_teacher_ids + list(same_name_ids)))
+
+    offering = await db.get(CourseOffering, course_offering_id)
+    if not offering or offering.teacher_id not in matched_teacher_ids:
+        raise HTTPException(status_code=403, detail="You do not have access to this course offering.")
+
+    # 1. Total held sessions for this course offering (weighted by duration_periods)
+    held_sessions_query = (
+        select(AttendanceSession.id, AttendanceSession.duration_periods)
+        .where(
+            AttendanceSession.course_offering_id == course_offering_id,
+            AttendanceSession.is_held == True,
+            AttendanceSession.status == SessionStatus.SUBMITTED
+        )
+    )
+    held_sessions = (await db.exec(held_sessions_query)).all()
+    session_durations = {row[0]: (row[1] or 1) for row in held_sessions}
+    total_held = sum(session_durations.values())
+
+    # 2. Query all enrolled students in this course offering
+    students_query = (
+        select(User, StudentProfile)
+        .join(StudentProfile, User.id == StudentProfile.user_id)
+        .join(StudentSubjectMap, User.id == StudentSubjectMap.student_id)
+        .where(StudentSubjectMap.course_offering_id == course_offering_id)
+        .order_by(StudentProfile.roll_number.asc(), User.full_name.asc())
+    )
+    enrolled_students = (await db.exec(students_query)).all()
+
+    if not enrolled_students:
+        return []
+
+    # 3. If sessions were held, count attended per student
+    attendance_map = {}
+    if total_held > 0 and session_durations:
+        records_query = (
+            select(AttendanceRecord.student_id, AttendanceRecord.session_id)
+            .where(
+                AttendanceRecord.session_id.in_(list(session_durations.keys())),
+                AttendanceRecord.status == AttendanceStatus.PRESENT
+            )
+        )
+        records_res = (await db.exec(records_query)).all()
+        for s_id, sess_id in records_res:
+            dur = session_durations.get(sess_id, 1)
+            attendance_map[s_id] = attendance_map.get(s_id, 0) + dur
+
+    summaries = []
+    for user, profile in enrolled_students:
+        attended = attendance_map.get(user.id, 0)
+        pct = round((attended / total_held * 100.0), 1) if total_held > 0 else 100.0
+
+        needed_75 = 0
+        if total_held > 0 and pct < 75.0:
+            raw_needed = (0.75 * total_held - attended) / 0.25
+            needed_75 = max(0, int(math.ceil(raw_needed)))
+
+        if threshold is not None and pct >= threshold:
+            continue
+
+        summaries.append(StudentAttendanceSummaryResponse(
+            student_id=user.id,
+            roll_number=profile.roll_number,
+            full_name=user.full_name,
+            total_held=total_held,
+            total_attended=attended,
+            attendance_percentage=pct,
+            classes_needed_for_75=needed_75
+        ))
+
+    # Sort: lowest attendance percentage first (most at-risk first), then roll number
+    summaries.sort(key=lambda s: (s.attendance_percentage, s.roll_number))
+    return summaries
+
+
+class SplitLabGroupsRequest(BaseModel):
+    g1_count: Optional[int] = None
+    custom_g1_student_ids: Optional[List[int]] = None
+
+
+@router.put("/course/{course_offering_id}/student/{student_id}/lab-group")
+async def update_student_lab_group(
+    course_offering_id: int,
+    student_id: int,
+    lab_group: str = Query(...),
+    teacher_id: int = Depends(require_teacher),
+    db: AsyncSession = Depends(get_session)
+):
+    """Assign or switch a student's lab group (e.g. G1 or G2)."""
+    clean_group = lab_group.strip().upper()
+    stmt = select(StudentSubjectMap).where(
+        StudentSubjectMap.course_offering_id == course_offering_id,
+        StudentSubjectMap.student_id == student_id
+    )
+    ssm = (await db.exec(stmt)).first()
+    if not ssm:
+        raise HTTPException(status_code=404, detail="Student is not enrolled in this course offering.")
+    ssm.lab_group = clean_group
+    db.add(ssm)
+    await db.commit()
+    return {"status": "success", "student_id": student_id, "lab_group": clean_group}
+
+
+@router.put("/course/{course_offering_id}/split-groups")
+async def split_course_lab_groups(
+    course_offering_id: int,
+    payload: SplitLabGroupsRequest,
+    teacher_id: int = Depends(require_teacher),
+    db: AsyncSession = Depends(get_session)
+):
+    """Quickly partition students into G1 and G2 for this lab course offering."""
+    stmt = (
+        select(StudentSubjectMap)
+        .join(StudentProfile, StudentSubjectMap.student_id == StudentProfile.user_id)
+        .where(StudentSubjectMap.course_offering_id == course_offering_id)
+        .order_by(StudentProfile.roll_number.asc())
+    )
+    ssms = (await db.exec(stmt)).all()
+    if not ssms:
+        raise HTTPException(status_code=404, detail="No enrolled students found.")
+
+    g1_ids = set(payload.custom_g1_student_ids or [])
+    g1_cutoff = payload.g1_count if payload.g1_count is not None else (len(ssms) + 1) // 2
+
+    for idx, ssm in enumerate(ssms):
+        if g1_ids:
+            ssm.lab_group = "G1" if ssm.student_id in g1_ids else "G2"
+        else:
+            ssm.lab_group = "G1" if idx < g1_cutoff else "G2"
+        db.add(ssm)
+
+    await db.commit()
+    return {"status": "success", "total_students": len(ssms), "g1_count": g1_cutoff}

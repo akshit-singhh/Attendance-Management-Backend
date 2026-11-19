@@ -23,6 +23,7 @@ class OfflineSyncPayload(BaseModel):
     mode: SessionMode = SessionMode.MANUAL
     is_held: bool = True
     reason_not_held: Optional[str] = None
+    batch_label: Optional[str] = None
     records: List[SyncRecordItem]
 
 
@@ -32,6 +33,7 @@ class StudentRosterResponse(BaseModel):
     full_name: str
     status: Optional[AttendanceStatus] = None
     record_id: Optional[int] = None
+    lab_group: Optional[str] = "G1"
 
 
 class CourseScheduleResponse(BaseModel):
@@ -45,6 +47,9 @@ class CourseScheduleResponse(BaseModel):
     credits: Optional[int] = 3
     course_type: Optional[str] = "LECTURE"
     weekly_hours: Optional[float] = None
+    duration_periods: int = 1
+    batch_label: Optional[str] = None
+    day_of_week: Optional[str] = None
 
 
 class SessionHistoryResponse(BaseModel):
@@ -52,6 +57,7 @@ class SessionHistoryResponse(BaseModel):
     subject_name: str
     section_name: str
     date: date
+    batch_label: Optional[str] = None
 
 
 class PendingClassResponse(BaseModel):
@@ -67,12 +73,16 @@ class PendingClassResponse(BaseModel):
     room: Optional[str] = "TBA"
     days_remaining: int
     is_expiring_soon: bool
+    duration_periods: int = 1
+    batch_label: Optional[str] = None
+    day_of_week: Optional[str] = None
 
 
 class PostponeClassRequest(BaseModel):
     course_offering_id: int
     date: date
     reason: str
+    duration_periods: int = 1
 
 
 # --- Admin / Coordinator Live Attendance Session Views ---
@@ -124,3 +134,13 @@ class SessionStudentRecord(BaseModel):
 class SessionDetailResponse(BaseModel):
     session: AttendanceSessionItemResponse
     records: List[SessionStudentRecord]
+
+
+class StudentAttendanceSummaryResponse(BaseModel):
+    student_id: int
+    roll_number: str
+    full_name: str
+    total_held: int
+    total_attended: int
+    attendance_percentage: float
+    classes_needed_for_75: int

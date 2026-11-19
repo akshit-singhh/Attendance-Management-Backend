@@ -30,6 +30,7 @@ class AttendanceSession(SQLModel, table=True):
     
     is_held: bool = Field(default=True)
     reason_not_held: Optional[str] = None
+    batch_label: Optional[str] = Field(default=None) # e.g. "G1", "G2", "ALL"
     
     status: SessionStatus = Field(default=SessionStatus.DRAFT)
     

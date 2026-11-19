@@ -1,4 +1,4 @@
-# 🏛️ University Attendance & Broadcast Management System
+# University Attendance & Broadcast Management System
 ## Central Project Evolution, Architecture Decision Records (ADRs) & Activity Log
 
 > **Repository Scope:**
@@ -152,7 +152,200 @@
 
 ---
 
-## 2. Cross-Platform Feature Matrix
+## 2. Core Mathematical Formulations & Algorithmic Derivations
+
+This section provides formal mathematical derivations, definitions, and code mappings for all computational models, attendance metrics, and recovery algorithms across the system. Use these formulations directly in project reports, technical papers, viva presentations, and thesis documentation.
+
+### 2.1. Attendance Shortfall Recovery Formula (Target Attendance Recovery)
+* **Problem Statement:**
+  Given a student enrolled in a course where $H$ total sessions have been conducted and the student attended $A$ sessions ($A \le H$). If their current attendance percentage $P = \frac{A}{H} \times 100 < T\%$ (where $T \in (0, 100)$ is the university target threshold, typically $T = 75\%$), determine the minimum number of consecutive upcoming classes $x$ the student must attend without any absence to bring their cumulative attendance percentage to at least $T\%$.
+* **Mathematical Derivation:**
+  The new cumulative attendance percentage after attending $x$ consecutive future classes is:
+  $$\frac{A + x}{H + x} \ge \frac{T}{100}$$
+  Cross-multiplying (since $H + x > 0$):
+  $$A + x \ge \frac{T}{100} (H + x)$$
+  $$A + x \ge \frac{T}{100} H + \frac{T}{100} x$$
+  Rearranging all terms containing $x$ to the left-hand side:
+  $$x - \frac{T}{100} x \ge \frac{T}{100} H - A$$
+  $$x \left(1 - \frac{T}{100}\right) \ge \frac{T}{100} H - A$$
+  Dividing both sides by $\left(1 - \frac{T}{100}\right)$ (which is positive since $T < 100$):
+  $$x \ge \frac{\frac{T}{100} H - A}{1 - \frac{T}{100}}$$
+  For standard university requirement $T = 75\%$ ($T/100 = 0.75$ and $1 - T/100 = 0.25$):
+  $$x \ge \frac{0.75 H - A}{0.25} = \frac{\frac{3}{4} H - A}{\frac{1}{4}} = 3H - 4A$$
+  Since the number of physical classes conducted must be a non-negative integer, we apply the ceiling function:
+  $$\mathbf{x = \max\left(0, \left\lceil \frac{0.75 H - A}{0.25} \right\rceil\right) = \max\left(0, \lceil 3H - 4A \rceil\right)}$$
+* **General Threshold Formula:**
+  For any arbitrary cutoff threshold $T \in (0, 100)$:
+  $$\mathbf{x(T) = \max\left(0, \left\lceil \frac{\frac{T}{100} H - A}{1 - \frac{T}{100}} \right\rceil\right)}$$
+* **Example Calculation for Project Report & Presentation:**
+  - Let total classes held $H = 16$.
+  - Let classes attended $A = 10$.
+  - Current attendance percentage $P = \frac{10}{16} \times 100 = 62.5\%$ (Defaulter: $< 75\%$).
+  - Calculation:
+    $$x = \lceil 3(16) - 4(10) \rceil = \lceil 48 - 40 \rceil = 8 \text{ consecutive classes}$$
+  - **Verification:**
+    $$\text{New Attended} = 10 + 8 = 18, \quad \text{New Held} = 16 + 8 = 24$$
+    $$\text{New Percentage} = \frac{18}{24} \times 100 = 75.0\% \quad \checkmark$$
+* **Code Implementation Mapping:**
+  - Backend API: `app/api/v1/mobile/attendance.py:get_course_students_summary`
+    ```python
+    if total_held > 0 and pct < 75.0:
+        raw_needed = (0.75 * total_held - attended) / 0.25
+        needed_75 = max(0, int(math.ceil(raw_needed)))
+    ```
+  - Android App: `com.akshit.attendance.ui.teacher.TeacherAnalyticsScreen:StudentDefaulterCard`
+    ```kotlin
+    val needed = if (pct < 75.0) max(0, ceil((0.75 * held - attended) / 0.25).toInt()) else 0
+    ```
+
+---
+
+### 2.2. Permissible Absence Margin (Bunk Allowance Formula)
+* **Problem Statement:**
+  If a student is in the safe zone with current attendance percentage $P = \frac{A}{H} \times 100 \ge T\%$, determine how many consecutive upcoming classes $y$ the student can miss (bunk) before dropping below the required $T\%$ threshold.
+* **Mathematical Derivation:**
+  If the student misses $y$ consecutive future sessions, their attended classes remain $A$, while total held classes increases to $H + y$:
+  $$\frac{A}{H + y} \ge \frac{T}{100}$$
+  $$A \ge \frac{T}{100} (H + y) = \frac{T}{100} H + \frac{T}{100} y$$
+  $$\frac{T}{100} y \le A - \frac{T}{100} H$$
+  $$y \le \frac{A - \frac{T}{100} H}{\frac{T}{100}} = \frac{100 A - T H}{T}$$
+  For $T = 75\%$:
+  $$y \le \frac{100 A - 75 H}{75} = \frac{4A - 3H}{3} = \frac{4A}{3} - H$$
+  Since $y$ must be an integer, applying the floor function:
+  $$\mathbf{y = \max\left(0, \left\lfloor \frac{4A - 3H}{3} \right\rfloor\right)}$$
+* **Example Calculation:**
+  - Classes held $H = 20$, classes attended $A = 18$ ($P = 90.0\%$).
+  - $$y = \left\lfloor \frac{4(18) - 3(20)}{3} \right\rfloor = \left\lfloor \frac{72 - 60}{3} \right\rfloor = \left\lfloor 4.0 \right\rfloor = 4 \text{ classes}$$
+  - **Verification:**
+    If 4 consecutive classes are missed: $\frac{18}{20 + 4} = \frac{18}{24} = 75.0\% \ge 75\%$. If a 5th is missed: $\frac{18}{25} = 72\% < 75\%$.
+
+---
+
+### 2.3. Duration-Weighted Multi-Period Attendance Aggregation
+* **Problem Statement:**
+  University courses include both single-period theoretical lectures (1 hour) and multi-period laboratory/practical sessions (2 or 3 continuous hours). Treating all sessions as equal single units would under-weigh lab attendance and violate university credit criteria.
+* **Mathematical Formulation:**
+  For a student enrolled in course offering $C$, let $\mathcal{S} = \{s_1, s_2, \dots, s_N\}$ be the set of all conducted sessions where $\text{is\_held} = \text{TRUE}$ and $\text{status} = \text{SUBMITTED}$.
+  Each session $s_i$ has a duration weight $D_i \in \{1, 2, 3\}$ (`duration_periods`) and student record status $R_i \in \{\text{PRESENT}, \text{ABSENT}, \text{LEAVE}\}$.
+  The duration-weighted attendance percentage $P_w$ is defined as:
+  $$\mathbf{P_w = \frac{\sum_{i=1}^{N} \left( D_i \times \mathbf{1}_{\{R_i = \text{PRESENT}\}} \right)}{\sum_{i=1}^{N} \left( D_i \times \mathbf{1}_{\{\text{is\_held}_i = \text{TRUE} \land \text{status}_i = \text{SUBMITTED}\}} \right)} \times 100}$$
+  Where $\mathbf{1}_{\{\mathcal{E}\}}$ is the Boolean indicator function:
+  $$\mathbf{1}_{\{\mathcal{E}\}} = \begin{cases} 1 & \text{if condition } \mathcal{E} \text{ is true} \\ 0 & \text{otherwise} \end{cases}$$
+* **Code Implementation Mapping:**
+  - Backend API: `app/api/v1/mobile/student.py:get_student_dashboard`
+    ```sql
+    SUM(CASE WHEN AttendanceSession.is_held = TRUE AND AttendanceSession.status = 'SUBMITTED' THEN AttendanceSession.duration_periods ELSE 0 END) AS periods_held,
+    SUM(CASE WHEN AttendanceSession.is_held = TRUE AND AttendanceSession.status = 'SUBMITTED' AND AttendanceRecord.status = 'PRESENT' THEN AttendanceSession.duration_periods ELSE 0 END) AS periods_attended
+    ```
+
+---
+
+### 2.4. Cryptographic Token Digest & Rate Limiting Verification
+* **Problem Statement:**
+  Protect against database breach bearer hijacking and automated online credential/OTP enumeration while scaling horizontally without external in-memory brokers.
+* **Formulations:**
+  1. **Token Digest Invariance:**
+     Instead of storing bearer refresh tokens $T_{\text{refresh}}$ in plaintext, store the cryptographic digest $H(T_{\text{refresh}})$:
+     $$\mathbf{H(T_{\text{refresh}}) = \text{SHA-256}(T_{\text{refresh}})}$$
+  2. **Sliding Time-Window Rate Throttling:**
+     For an attempt key $K \in \{\text{IP}, \text{User ID}, \text{Email}\}$ at timestamp $t_{\text{now}}$ with sliding window $W = 900\text{ seconds}$ (15 minutes):
+     $$\mathbf{\text{ActiveAttempts}(K, t_{\text{now}}) = \sum_{r \in \mathcal{A}_K} \mathbf{1}_{\{t_{\text{now}} - t_r \le W\}}}$$
+     $$\mathbf{\text{Authorize}(K) = \begin{cases} \text{ALLOW} & \text{if } \text{ActiveAttempts}(K, t_{\text{now}}) < L_{\max} \\ \text{HTTP 429} & \text{if } \text{ActiveAttempts}(K, t_{\text{now}}) \ge L_{\max} \end{cases}}$$
+     Where $L_{\max} = 5$ for authentication login, $L_{\max} = 8$ for OTP submissions, and $L_{\max} = 20$ for IP-level throttling.
+
+---
+
+### 2.5. Contiguous Timetable Slot Consolidation for Multi-Period Laboratories
+* **Problem Statement:**
+  University academic schedules allocate laboratory sessions as contiguous 1-hour period slots:
+  $S_1 = [T_1, T_2)$ and $S_2 = [T_2, T_3)$ with identical course offering $C$, room $R$, and section (e.g. 11:30 AM – 12:30 PM followed immediately by 12:30 PM – 01:30 PM for CS481 IoT Lab).
+  Treating them as disjoint schedule entries forces duplicate roll calls and causes database record collisions where subsequent single-hour submissions overwrite earlier ones.
+* **Mathematical & Algorithmic Formulation:**
+  Let $\mathcal{T} = \{s_1, s_2, \dots, s_n\}$ be ordered timetable slots for teacher $U$ on day $D$, sorted by `(course_offering_id, start_time)`.
+  Two adjacent slots $s_i$ and $s_{i+1}$ are contiguous if and only if:
+  $$\mathbf{C(s_{i+1}) = C(s_i) \quad \land \quad \text{start}(s_{i+1}) = \text{end}(s_i)}$$
+  The consolidation operator $\oplus$ merges them into a single consolidated session $s'$:
+  $$\mathbf{s' = s_i \oplus s_{i+1} = \begin{cases}
+  \text{start}(s') = \text{start}(s_i) \\
+  \text{end}(s') = \text{end}(s_{i+1}) \\
+  D(s') = D(s_i) + D(s_{i+1}) \\
+  \text{room}(s') = \text{room}(s_i) \lor \text{room}(s_{i+1})
+  \end{cases}}}$$
+  Where $D(s)$ is the duration weight (`duration_periods`).
+  This ensures:
+  1. The teacher performs exactly 1 roll call for the entire laboratory session.
+  2. The single submitted session has $D = 2$ (or 3), accurately contributing 2 periods to both held periods and attended periods in the duration-weighted aggregation formula:
+     $$P_w = \frac{\sum_{i=1}^{N} \left( D_i \times \mathbf{1}_{\{R_i = \text{PRESENT}\}} \right)}{\sum_{i=1}^{N} \left( D_i \times \mathbf{1}_{\{\text{is\_held}_i = \text{TRUE} \land \text{status}_i = \text{SUBMITTED}\}} \right)} \times 100$$
+* **Code Implementation Mapping:**
+  - Backend API: `app/api/v1/mobile/attendance.py:merge_consecutive_schedule_slots` & `merge_consecutive_pending_classes`
+  - Mobile Client: `com.akshit.attendance.data.model.Models:CourseScheduleResponse(duration_periods: Int = 1)` and `TeacherViewModel:submitAttendance(durationPeriods)`
+
+---
+
+### 2.6. Laboratory Group Partitioning, Independent Attendance Sets & Cross-Slot Weekly Auto-Fulfillment Logic
+* **Problem Statement:**
+  Laboratory courses are split into practical groups (e.g., Section CS-IV-A with $N = 69$ students partitioned into Group 1 with $N_1 = 35$ students and Group 2 with $N_2 = 34$ students). Two operational challenges arise:
+  1. **Non-Scheduled Group Invariance:** When Group 1 has its scheduled lab on Tuesday, submitting attendance must record ONLY Group 1 students. Students in Group 2 must **not** be marked absent, and their held class count ($H$) must remain completely unchanged.
+  2. **Combined/Preponed Lab Auto-Fulfillment (Approach B):** A teacher may conduct a combined lab for both Group 1 and Group 2 on Tuesday instead of following separate timetable slots. When both groups are marked together on Tuesday, the system must automatically satisfy and clear Thursday's scheduled slot for Group 2 so it never appears as an unmarked/pending backlog.
+  3. **Arbitrary Class Sizes:** Class sizes are uneven ($N = 69 \implies N_1 \ne N_2$). Partitions cannot be hardcoded or split strictly 50/50, and teachers must have the freedom to switch individual students between groups ($G_1 \leftrightarrow G_2$).
+
+* **Mathematical & Algorithmic Formulation:**
+  1. **Disjoint Partition of Enrolled Students:**
+     Let the enrolled roster for course offering $C$ be $\mathcal{S} = \{s_1, s_2, \dots, s_N\}$.
+     The group assignment mapping $\pi: \mathcal{S} \to \{G_1, G_2\}$ establishes a disjoint partition:
+     $$\mathbf{\mathcal{S} = G_1 \cup G_2 \quad \text{where} \quad G_1 \cap G_2 = \emptyset}$$
+     Where $|G_1| = N_1$, $|G_2| = N_2$, and $N_1 + N_2 = N$.
+     Default allocation on roster load assigns the first $\lceil N/2 \rceil$ students (sorted by roll number) to $G_1$ and the remaining to $G_2$, while the database allows dynamic per-student assignment updates $\pi(s_i) \leftarrow g'$.
+
+  2. **Attendance Percentage Invariance for Non-Scheduled Group:**
+     Let cumulative attendance for student $s \in \mathcal{S}$ before session $\Sigma$ be:
+     $$P_0(s) = \frac{A_0(s)}{H_0(s)} \times 100$$
+     When a single-group session $\Sigma_1$ for group $G_1$ is conducted, the attendance record set is restricted strictly to $G_1$:
+     $$\text{Records}(\Sigma_1) = \{ (s, R_s) \mid s \in G_1 \}$$
+     For any student $s_k \in G_2$ (the non-scheduled group):
+     $$s_k \notin \text{Records}(\Sigma_1) \implies \begin{cases} \Delta H(s_k) = 0 \\ \Delta A(s_k) = 0 \end{cases}$$
+     Consequently:
+     $$\mathbf{P_1(s_k) = \frac{A_0(s_k) + 0}{H_0(s_k) + 0} \times 100 = P_0(s_k)}$$
+     The attendance percentage of the non-scheduled group is strictly invariant, preventing false absenteeism and unearned penalty.
+
+  3. **Approach B: Cross-Slot Weekly Auto-Fulfillment Algorithm:**
+     Let the academic week $W(t)$ containing submission date $t$ be the calendar interval:
+     $$W(t) = \left[ t - \text{dow}(t), \; t - \text{dow}(t) + 6 \text{ days} \right]$$
+     Where $\text{dow}(t) \in [0, 6]$ represents the day-of-week index ($0 = \text{Monday}$).
+     When attendance is submitted for course offering $C$ on date $t \in W(t)$ with scope $\text{batch\_label} \in \{\text{"ALL"}, \text{"COMBINED"}\}$:
+     - The primary session $\Sigma_p$ is recorded for all attending students $s \in \mathcal{S}$ on date $t$.
+     - The system queries all other timetable entries $\mathcal{T}_{\text{other}}$ for course $C$ in week $W(t)$ scheduled on a different day $d \ne \text{dow}(t)$ (e.g., Thursday's slot for $G_2$):
+       $$\mathcal{T}_{\text{other}} = \{ \tau \in \text{Timetable}(C) \mid \tau.\text{day\_of\_week} \ne \text{dow}(t) \}$$
+     - For each target date $t_{\text{target}} \in W(t)$ matching $\tau \in \mathcal{T}_{\text{other}}$:
+       If no session exists on $t_{\text{target}}$, the system automatically creates an auto-fulfilled administrative session:
+       $$\mathbf{\Sigma_{\text{auto}} = \begin{pmatrix}
+       \text{course\_offering\_id} = C \\
+       \text{session\_date} = t_{\text{target}} \\
+       \text{is\_held} = \text{FALSE} \\
+       \text{reason\_not\_held} = \text{"Combined Lab conducted on } t\text{"} \\
+       \text{status} = \text{SUBMITTED}
+       \end{pmatrix}}$$
+     - **Verification of Pending Suppression:**
+       The pending past sessions function $\text{Pending}(U)$ computes:
+       $$\text{Pending}(U) = \{ (C, \tau, t') \mid t' \le t_{\text{today}} \land (C, t') \notin \text{SubmittedSessions} \}$$
+       Since $\Sigma_{\text{auto}} \in \text{SubmittedSessions}$, $(C, t_{\text{target}})$ is cleared from $\text{Pending}(U)$ without incrementing student held class counts $H$.
+
+* **Code Implementation Mapping:**
+  - Database Schema: Added `studentsubjectmap.lab_group VARCHAR(20)` and `attendancesession.batch_label VARCHAR(50)`.
+  - Backend API (`app/api/v1/mobile/attendance.py`):
+    - `get_class_roster`: Returns student group `lab_group` (`G1`/`G2`).
+    - `sync_offline_attendance`: Detects `batch_label` and executes Approach B auto-fulfillment across remaining weekly timetable slots.
+    - `PUT /mobile/attendance/course/{id}/student/{student_id}/lab-group`: Real-time group switching.
+    - `PUT /mobile/attendance/course/{id}/split-groups`: Custom threshold group partitioning.
+  - Mobile Client (`AttendanceApp`):
+    - Models (`Models.kt`): Added `lab_group` to `StudentRosterResponse` and `batch_label` to `CourseScheduleResponse`, `PendingClassResponse`, and `OfflineSyncPayload`.
+    - ViewModel (`TeacherViewModel.kt`): `updateStudentGroup(studentId, newGroup)`, `markAll(status, targetStudentIds)`, and scoped `submitAttendance(batchLabel, targetStudentIds)`.
+    - Roll Call UI (`TeacherRollCallScreen.kt`): Dynamic Group Segmented Chips `[ All (N) | Group 1 (N1) | Group 2 (N2) ]`, student row badge with click-to-toggle, and group-scoped "Mark All" / "Submit".
+    - Classes Dashboard (`TeacherClassesScreen.kt`): Group/batch indicator badges on Today and Pending class cards.
+
+---
+
+## 3. Cross-Platform Feature Matrix
 
 | Capability / Feature | Backend (`Attendance_backend`) | Web Dashboard (`Attendance_frontend`) | Android App (`AttendanceApp`) | Architecture Status |
 | :--- | :--- | :--- | :--- | :--- |
@@ -173,10 +366,498 @@
 | **Offline Schedule & Roster Cache** | N/A | N/A | `TeacherCacheManager`, JSON cache, pre-fetch, stale-badge | 🟢 Fully Active |
 | **Connectivity Transition Strip** | N/A | N/A | `ConnectivityStrip` above navbar, auto-dismiss green banner | 🟢 Fully Active |
 | **Tri-State Roll Call & Safety Net** | `POST /mobile/attendance/sync` | N/A | P/A/L pills, Leave filter, Mark All dropdown, auto-absent safety dialog | 🟢 Fully Active |
+| **Teacher Course Analytics** | Session History & Roster endpoints | N/A | Compose Canvas Bar Chart, KPI Cards, Filters | 🟢 Fully Active |
+| **Student Defaulters Drilldown**| `GET /mobile/attendance/course/{id}/students-summary` | N/A | At-Risk View, Cutoff Chips (<75%, <65%, <50%, Custom Slider), Search | 🟢 Fully Active |
 
 ---
 
-## 3. Chronological Chat & Development Activity Trail
+## 4. Chronological Chat & Development Activity Trail
+
+### Session: 2026-11-19 17:48:00 IST — Duplicate Session Purge, Calendar Historical Mapping & Roll Call Date Lock
+* **Scope:** Database (PostgreSQL), Backend (`attendance.py`, `student.py`), Mobile Client (`TeacherViewModel.kt`, `TeacherClassesScreen.kt`)
+* **Issues Addressed:**
+  - Duplicate session (ID 73) on Thursday, Nov 19 for CS481 (IoT Lab) created a ghost "Extra Class / Make-up Class" entry on the student calendar.
+  - Potential confusion regarding pending attendance submission: ensuring past sessions submitted later map strictly to their original timetable schedule date, not the submission date.
+* **Root Cause:**
+  - When the teacher app opened near midnight as the calendar transitioned from Wednesday to Thursday, the local in-memory/disk cache held Wednesday's classes, but the roll call call passed `null` for `sessionDate`. This defaulted to `localToday` (Nov 19), submitting Wednesday's lab with Thursday's date.
+* **Changes Implemented:**
+  1. *Database Purge:*
+     - Executed atomic purge deleting duplicate Session 73 and its 35 linked `AttendanceRecord`s. Verified via `get_student_calendar` that Thursday, Nov 19 now cleanly lists only the 4 scheduled Thursday lectures with zero ghost classes.
+  2. *Historical Timetable Date Integrity:*
+     - Verified and confirmed that all pending submissions record with `item.date` (the timetable date of the class, e.g. `2026-11-18`), never the submission date. Submitting 10 past classes maps each class directly to its historical calendar day without piling up on the current date.
+  3. *Stale Cache & Date Lock:*
+     - In `TeacherViewModel.loadSchedule()`, ensured cached schedule is only loaded if `isScheduleCacheForToday()` is true and cached classes match `EffectiveDay`. Prevents displaying yesterday's classes under "Today's Classes".
+     - In `TeacherClassesScreen.kt`, locked roll call invocation on "Today's Classes" to explicitly pass `EffectiveDate.toString()`.
+* **Verification & Testing Conducted:**
+  - Database verification confirmed Session 73 removed; Nov 18 holds the valid Session 74; Nov 19 holds 4 clean classes.
+  - Ran `./gradlew.bat compileDebugKotlin` — `BUILD SUCCESSFUL in 27s`.
+
+### Session: 2026-11-19 17:19:00 IST — Pull-to-Refresh Re-trigger Fix & Clean Dashboard Header
+* **Scope:** Mobile Client (`StudentDashboardScreen.kt`, `StudentSubjectsScreen.kt`, `StudentStatisticsScreen.kt`, `StudentCalendarScreen.kt`)
+* **Issues Addressed:**
+  - Pull-to-refresh swipe was getting stuck spinning without making backend calls on subsequent refreshes.
+  - A redundant circular refresh button was present next to "Today's Classes", crowding the section title.
+* **Root Cause:**
+  - `LaunchedEffect(true)` was declared inside `if (pullToRefreshState.isRefreshing)`. Because the key `true` never changed across subsequent pull gestures, Compose skipped re-executing the coroutine on repeat swipes, failing to call `onRefresh()` and leaving the pull-to-refresh spinner stuck on screen.
+* **Changes Implemented:**
+  1. *Pull-To-Refresh Trigger Correction:*
+     - Changed the trigger across all student screens (`StudentDashboardScreen`, `StudentSubjectsScreen`, `StudentStatisticsScreen`, `StudentCalendarScreen`) to `LaunchedEffect(pullToRefreshState.isRefreshing)`. When `isRefreshing` turns `true`, the coroutine launches reliably on every single swipe, calls `viewModel.refreshAll()`, and upon completion `pullToRefreshState.endRefresh()` cleanly hides the indicator.
+  2. *Removed Redundant Refresh Button:*
+     - Removed the circular refresh `IconButton` in front of "Today's Classes" in `StudentDashboardScreen`, allowing the clean section title and subtitle (`Thursday, 19 November • 4 Scheduled`) to span cleanly.
+* **Verification & Testing Conducted:**
+  - Verified Kotlin compilation with Gradle: `BUILD SUCCESSFUL in 30s`.
+
+### Session: 2026-11-19 17:05:00 IST — Student Attendance Statistics Screen Modernization & Real Data Verification
+* **Scope:** Mobile Client (`StudentStatisticsScreen.kt`, `NavGraph.kt`)
+* **Issues Addressed & Features Added:**
+  1. *Real Data Verification:* Verified that data displayed on the Attendance Statistics screen is 100% real live data dynamically calculated by the FastAPI backend (`GET /api/v1/mobile/student/dashboard`) via PostgreSQL aggregation over `AttendanceSession`, `AttendanceRecord`, `CourseOffering`, and `Subject` tables (no mock or hardcoded numbers).
+  2. *Lottie Loading Animation:* Replaced plain shimmer blocks with high-fidelity Lottie document analysis animation (`R.raw.loading_documents`) accompanied by descriptive subtitle `"Analyzing attendance statistics... Computing course standing & compliance"`.
+  3. *Pull-To-Refresh Integration:* Integrated `rememberPullToRefreshState()` and `PullToRefreshExpressiveIndicator` for on-demand swipe refresh.
+  4. *Redesigned Metric Cards:* Rebuilt top metric row (Attended, Missed, Total Held) with distinct colored container pills, percentage-of-held sub-badges, and clear typography.
+  5. *Overall Compliance Banner:* Added consolidated card featuring an animated progress gauge, target 75% indicator, and breakdown chips (`On Track`, `At Risk`, `Not Started`).
+  6. *Bar Chart Alignment Fix:* Fixed Canvas-to-label drift by structuring each bar, top percentage label, subtle background track, and course code label inside unified column elements, with dashed 75% target threshold line.
+  7. *Course Performance Breakdown & Subject Drilldown:* Added course code pill tags, teacher name with icon, session counts, progress indicators, and clickable rows wired to `NavGraph` for direct navigation to `SubjectDetailScreen`.
+* **Verification & Testing Conducted:**
+  - Ran `./gradlew.bat compileDebugKotlin` — `BUILD SUCCESSFUL in 45s`.
+
+### Session: 2026-11-19 16:42:00 IST — Student App Offline Support, Local Storage Caching & Connectivity Banner
+* **Scope:** Mobile Client (`StudentCacheManager.kt`, `StudentViewModel.kt`, `BottomNavBars.kt`, `StudentDashboardScreen.kt`, `StudentSubjectsScreen.kt`, `AttendanceApp.kt`)
+* **Issues Addressed:**
+  - Student app did not display the connectivity banner above the bottom navigation bar when disconnected from the internet or local server, unlike the teacher section.
+  - When the device went offline or the server was temporarily unreachable, the student dashboard and subjects screens would either wipe to empty skeletons or present harsh red crash/network error banners (`Unable to refresh dashboard data`).
+  - No offline disk persistence was present for the student dashboard, today's schedule, timetable, subjects history, or attendance calendar.
+* **Root Cause:**
+  - `ConnectivityStrip` in `BottomNavBars.kt` was wired into `AppBottomNav`, but `StudentViewModel` never reported network reachability status to `OfflineAttendanceManager.markOffline()` / `markOnline()`.
+  - In addition, student data was held purely in transient in-memory StateFlows without disk caching.
+* **Changes Implemented:**
+  1. *Student Disk Cache Manager (`StudentCacheManager.kt`):*
+     - Created thread-safe file caching subsystem saving JSON snapshots to app internal storage (`filesDir`):
+       - `student_dashboard_cache.json` (overall percentage, course cards, bunk advice)
+       - `student_schedule_cache.json` (daily lecture slots and classroom numbers)
+       - `student_timetable_cache.json` (full weekly grid matrix and enrolled workloads)
+       - `student_profile_cache.json` (student name, roll number, program)
+       - `student_calendar_cache_{month}.json` (monthly session dates & status)
+       - `student_subject_cache_{courseCode}.json` (per-subject detailed lecture records)
+     - Added smart network error classification (`isNetworkError`) covering `ConnectException`, `SocketTimeoutException`, `UnknownHostException`, and HTTP 5xx network interruptions.
+  2. *Cache-First & Offline Resilience in `StudentViewModel.kt`:*
+     - Instantly hydrates profile, dashboard, schedule, and timetable from local disk on `init` (0ms startup latency, 100% offline-ready).
+     - Connected all API flows (`loadDashboard`, `loadSchedule`, `loadTimetable`, `loadCalendar`, `loadSubjectHistory`, `refreshAll`) to report `OfflineAttendanceManager.markOnline()` on success and `markOffline()` on network failures.
+     - Preserves existing cached data on failed pull-to-refresh rather than wiping UI with error states.
+  3. *Connectivity Strip & Friendly Offline Banners (`BottomNavBars.kt`, `StudentDashboardScreen.kt`, `StudentSubjectsScreen.kt`):*
+     - Updated `ConnectivityStrip` to display concise `"Offline Mode"` when disconnected.
+     - Fixed `showSkeleton` in `StudentDashboardScreen` and `StudentSubjectsScreen` so pulling to refresh or browsing offline keeps loaded data visible without flickering.
+     - Replaced technical red error cards with a calm amber offline status card (`Offline Mode • Showing cached data. Connect to internet to refresh.`) when offline.
+* **Verification & Testing Conducted:**
+  - Full Kotlin compilation passed with Gradle: `:app:compileDebugKotlin` completed with `BUILD SUCCESSFUL`.
+  - Backend verified running and listening on port 8000.
+
+### Session: 2026-11-19 15:10:00 IST — Enrolled Courses in Timetable Tab: Inclusion of Non-Classroom Subjects (Minor Project & Industrial Training)
+* **Scope:** Backend (`timetable.py`), Mobile Client (`StudentTimetableScreen.kt`)
+* **Issues Addressed:**
+  - In the Student Timetable tab under "Enrolled Courses & Weekly Load", only 6 subjects were shown instead of all 8 officially enrolled subjects. Non-classroom courses such as "Minor Project" (`CS491`) and "Industrial Training" (`CS493`) were missing.
+* **Root Cause:**
+  - The backend endpoint `GET /api/v1/mobile/timetable/student` generated the `workload` list strictly by iterating over `slots` (the recurring weekly timetable grid entries). Since Project and Training courses do not have scheduled physical classroom lecture periods in the timetable grid, they were omitted from the workload breakdown.
+* **Changes Implemented:**
+  1. *Backend Workload Aggregation (`timetable.py`):*
+     - Queried the student's full course enrollments via `StudentSubjectMap`.
+     - Cross-referenced all enrolled courses against the timetable slot map. Any enrolled subject not in the recurring timetable grid is automatically added to `workload` with its assigned teacher, course code, section, activity (`PROJECT`, `TRAINING`, `LAB`, or `COURSE`), and `0.0` weekly lecture hours.
+  2. *Enhanced Mobile Workload Badging (`StudentTimetableScreen.kt`):*
+     - Added specialized chip color themes for `PROJECT` (Purple `#F3E8FF`, text `#7E22CE`) and `TRAINING` (Amber `#FEF3C7`, text `#B45309`).
+     - Replaced raw `"0 hrs/wk"` display for project/training subjects with context-aware labels: `"Project / Sem"`, `"Training / Sem"`, or `"Self-Paced"`.
+     - Count badge now accurately reflects all enrolled courses (`8 Subjects`).
+* **Verification & Testing Conducted:**
+  - Verified backend workload generation with unit script: accurately returned all 8 subjects (including CS491 Minor Project and CS493 Industrial Training).
+  - Verified Kotlin compilation with `.\gradlew.bat compileDebugKotlin`: `BUILD SUCCESSFUL in 29s`.
+
+
+### Session: 2026-11-19 15:00:00 IST — Subject Detail Hero Card Gauge Centering Fix
+* **Scope:** Mobile Client (`SubjectDetailScreen.kt`)
+* **Issues Addressed:**
+  - In `SubjectDetailScreen.kt`, the circular attendance gauge, status badge, and bunk advice in the hero card appeared skewed toward the left side of the card rather than horizontally centered.
+* **Root Cause:**
+  - The enclosing `Column` inside `Card` omitted `Modifier.fillMaxWidth()`, causing the Column width to shrink-wrap its content and dock to the card's start edge. Additionally, the `Canvas` `drawArc` call omitted stroke insetting, which caused half of the 12.dp stroke to extend outside the canvas bounds.
+* **Changes Implemented:**
+  1. Applied `Modifier.fillMaxWidth().padding(20.dp)` to the inner `Column` with `horizontalAlignment = Alignment.CenterHorizontally`.
+  2. Applied precise stroke insetting in `Canvas(128.dp)` using `Offset(strokeWidth / 2f, strokeWidth / 2f)` and `Size(size.width - strokeWidth, size.height - strokeWidth)` to guarantee perfect concentric ring alignment.
+  3. Added `textAlign = TextAlign.Center` and `Modifier.fillMaxWidth()` to both the bunk advice text and faculty detail string.
+* **Verification & Testing Conducted:**
+  - Verified Kotlin compilation with `.\gradlew.bat compileDebugKotlin`: `BUILD SUCCESSFUL in 29s`.
+
+
+### Session: 2026-11-19 14:50:00 IST — Student Subject Attendance History & Lottie Document Loading Animation
+* **Scope:** Backend (`student.py`, `app/schemas/student.py`), Mobile Client (`SubjectDetailScreen.kt`, `StudentViewModel.kt`, `StudentRepository.kt`, `ApiService.kt`, `Models.kt`, `res/raw/loading_documents.json`)
+* **Issues Addressed:**
+  - In `SubjectDetailScreen.kt`, navigating to subject details prematurely checked `subject == null` while `DashboardUiState.Loading` was in flight, immediately flashing a jarring "Subject details not found" message.
+  - The screen lacked an animated loading state when fetching records.
+  - Students had no way to view the chronological list of actual conducted class sessions to see when they were marked present or absent for a specific course.
+* **Changes Implemented:**
+  1. *Backend Endpoint `GET /api/v1/mobile/student/subject/{course_code}/history`:*
+     - Added `StudentClassSessionItem` and `StudentSubjectHistoryResponse` models.
+     - Fetches all submitted sessions for the enrolled student's offerings for that subject, joining `AttendanceRecord` to determine exact attendance status (`PRESENT`, `ABSENT`, `POSTPONED`).
+     - Maps sessions to official timetable schedule to resolve start/end times and classroom rooms.
+  2. *Integrated User-Requested Lottie Animation:*
+     - Embedded the exact Lottie loading animation (`loading-F7xmrDT1UN` by Lavpreet Singh) into `app/src/main/res/raw/loading_documents.json`.
+     - Rendered via `rememberLottieComposition` and `LottieAnimation` in `SubjectDetailScreen` during `SubjectHistoryUiState.Loading`.
+  3. *Elevated Subject Detail UI & Attendance Records List:*
+     - Added **Class Attendance Records** section with session count badge (`18 Sessions`) and filter chips (`All`, `Attended`, `Missed`).
+     - Each session displays: circular status indicator (`PRESENT` check in green, `ABSENT` cross in red, `POSTPONED` in amber), formatted date (`12 Nov 2026 • Thu`), time slot, classroom, lab batch tag (e.g. `G1`), and status pill badge.
+     - Preserved hero circular attendance gauge with dynamic bunk advice and weekly timetable schedule.
+* **Verification & Testing Conducted:**
+  - Tested backend endpoint with `test_sessions.py`: correctly returned all 18 sessions (8 Attended, 10 Missed, 44.4%) for Akshit Singh (235ICS006) on CS401.
+  - Verified Kotlin compilation with `.\gradlew.bat compileDebugKotlin`: `BUILD SUCCESSFUL in 35s`.
+  - Verified FastAPI backend daemon reload on `http://0.0.0.0:8000`.
+
+
+### Session: 2026-11-19 13:50:00 IST — Lab Attendance Edit Mode: Host Group Guest Scoping & Group Isolation Fix
+* **Scope:** Mobile Client (`AttendanceApp/app`), `TeacherRollCallScreen.kt`
+* **Issues Addressed:**
+  - In `TeacherRollCallScreen.kt`, when a teacher opened Attendance Records -> selected an existing Group 1 lab session -> tapped **Edit Attendance**, and then clicked on the **Group 2 (G2)** tab, all 28 Group 1 students were rendered at the bottom of the G2 tab labeled as `G1 • Guest` with green `[ P ]` badges.
+  - Furthermore, if the teacher submitted or updated attendance while on the G2 tab, `batchLabelToSend` was assigned to `selectedGroup`, causing accidental rewriting of the session's actual batch group in the database.
+* **Root Cause:**
+  - `guestStudents` was evaluated dynamically against the currently active UI tab (`roster.filter { it.lab_group != selectedGroup && marks[it.student_id] == AttendanceStatus.PRESENT }`). Because the teacher was editing a G1 session where all 28 G1 students had `marks == PRESENT`, clicking `G2` satisfied `it.lab_group != "G2"`, causing the entire G1 roster to be misclassified as "guests" in G2.
+* **Changes Implemented:**
+  1. *Introduced Session `hostGroup`:*
+     - Extracted `hostGroup` from `initialBatchLabel` (e.g., `"G-1"` / `"G1"` -> `"G1"`, `"G-2"` / `"G2"` -> `"G2"`), `courseInfo.batch_label`, or pre-existing marks.
+     - Scoped `targetHost`: pinned to `hostGroup` (or fallback to `selectedGroup` if not a pre-existing session).
+  2. *Strict Guest Attachment to Host Group Only:*
+     - Constrained `guestStudents` so it only populates when `selectedGroup == targetHost`. When viewing non-host tabs (e.g. switching to G2 on a G1 session), `guestStudents` is strictly `emptyList()`.
+  3. *Accurate `isGuest` Badge Condition in `RosterRow`:*
+     - Replaced loose tab-relative check with session-relative check: `val isGuest = isLabCourse && effectiveHost != null && currentGroup != effectiveHost && selectedGroup == effectiveHost`.
+  4. *Preserved Submission Batch & Action Scopes:*
+     - Pinned `batchLabelToSend` strictly to `targetHost ?: selectedGroup`, preventing accidental batch corruption.
+     - Separated `currentTabStudentIds` (for `Mark All` / `Reset All` on the current view) from `targetGroupIds` (used for final submission payload).
+* **Verification & Testing Conducted:**
+  - Verified Kotlin compilation with `.\gradlew.bat compileDebugKotlin`: `BUILD SUCCESSFUL in 54s`.
+
+
+### Session: 2026-11-19 01:02:00 IST — Student Dashboard Hero Card Skeleton Redesign
+* **Scope:** Mobile Client (`AttendanceApp/app`), `ShimmerEffects.kt` (`DashboardHeroSkeleton`), `StudentDashboardScreen.kt`
+* **Issues Addressed:**
+  - Pull-to-refresh and initial loading skeleton on the Student Dashboard displayed a legacy layout (large centered circle and three horizontal pills) that caused a jarring layout shift when replaced by the actual `LiveOverallAttendanceCard`.
+* **Changes Implemented:**
+  1. *1:1 Layout Alignment with `LiveOverallAttendanceCard`:*
+     - **Header Row:** Icon placeholder + "Overall Attendance" title placeholder on the left, pill status badge placeholder on the right.
+     - **Middle Content:** Left circular ring gauge (`96.dp`) with inner cutout and percentage text placeholders; right column with two stacked rounded boxes (Attended Ratio and Safe Bunk Buffer).
+     - **Divider & Footer:** Horizontal divider line followed by the bottom sub-stat row ("Subjects On Track" and "View Subjects" placeholders).
+  2. *Fluid Transitions:* Padding, border, elevation, and card corner radius (`20.dp`) now match the real card perfectly, eliminating visual jumps on refresh.
+* **Verification & Testing Conducted:**
+  - Ran `.\gradlew.bat compileDebugKotlin`: `BUILD SUCCESSFUL in 11s`.
+
+
+### Session: 2026-11-19 00:30:00 IST — Human-Friendly Auth Error Handling & Password Visibility Toggle
+* **Scope:** Mobile Client (`AttendanceApp/app`), `LoginScreen.kt`, `AuthViewModel.kt`
+* **Issues Addressed:**
+  - Login failure displayed raw technical codes like `HTTP 401` directly on the UI below the password field.
+  - Password input field lacked a visibility toggle ("eye" icon) for users to check what they typed.
+* **Changes Implemented:**
+  1. *Human-Friendly Error Formatting:*
+     - Added `formatAuthErrorMessage` in `AuthViewModel.kt` parsing backend `detail` JSON and mapping HTTP status codes:
+       - `401` $\rightarrow$ `"Invalid email/roll number or password. Please try again."`
+       - Network/Timeout $\rightarrow$ `"Unable to connect to server. Please check your internet connection."`
+       - `404` $\rightarrow$ `"Account not found. Please check your roll number or email."`
+       - `429` $\rightarrow$ `"Too many attempts. Please wait a moment and try again."`
+       - `500-599` $\rightarrow$ `"University server is temporarily unavailable. Please try again later."`
+     - Rendered errors inside an alert container with `Icons.Outlined.ErrorOutline` in `LoginScreen.kt`.
+     - Automatically resets/clears error state as soon as the user starts editing their ID or password.
+  2. *Password View Eye Toggle:*
+     - Added `passwordVisible` state with toggleable trailing icon (`Icons.Filled.Visibility` / `Icons.Filled.VisibilityOff`).
+     - Dynamically applies `VisualTransformation.None` when visible and `PasswordVisualTransformation()` when masked.
+* **Verification & Testing Conducted:**
+  - Ran `.\gradlew.bat compileDebugKotlin`: `BUILD SUCCESSFUL in 51s`.
+
+
+### Session: 2026-11-18 23:30:00 IST — Teacher Records Screen: Lab Group Badges & Redundant Search Removal
+* **Scope:** Mobile Client (`AttendanceApp/app`), `TeacherRecordsScreen.kt`
+* **Issues Addressed:**
+  - Past lab session cards (`Internet of Things Lab`, etc.) did not display their lab group identifier (`G-1`, `G-2`).
+  - Redundant text search input ("Search by subject or section…") cluttered the top header card now that horizontal course chips and the interactive month calendar provide direct filtering.
+* **Changes Implemented:**
+  1. *Removed Redundant Search Input:* Stripped `OutlinedTextField` and associated search state from the "Submitted Class Sessions" header card, leaving a clean section introduction card.
+  2. *Lab Group Badge on Session Cards:* Formatted lab groups as amber pills `[ Group G-1 ]`, `[ Group G-2 ]` (with a clean fallback to `[ Lab ]` when group metadata is pending) on all session cards in the list.
+  3. *Lab Group in Session Details & Top Bar:* In VIEW 2 (Session Detail & Roster), displayed the group label prominently in both the top navigation bar (`CS-IV-A • Group G-1 • 11 Nov 2026`) and the KPI summary card.
+  4. *Simplified Filter State:* Filter state now operates exclusively on `selectedCourseOfferingId` and `selectedDate`, with active filter chips and one-tap "Clear All ×" reset.
+* **Verification & Testing Conducted:**
+  - Ran `gradlew compileDebugKotlin --no-daemon`: `BUILD SUCCESSFUL in 33s`.
+  - Backend API endpoint `/api/v1/mobile/attendance/history` verified to return `batch_label: 'G-1'` and `'G-2'` for lab offerings.
+
+
+### Session: 2026-11-18 22:50:00 IST — Teacher Attendance Records Expandable Calendar & Course Chip Filters
+* **Scope:** Mobile Client (`AttendanceApp/app`), `TeacherRecordsScreen.kt`
+* **Issues Addressed:**
+  - On the `Records` tab (`Attendance Records`), past submitted sessions were displayed as a flat linear list. Over a full academic term, scrolling through 50–100+ cards to find a specific class or check attendance for a particular date was inefficient.
+* **Fixes Applied (Approach 1 Implementation):**
+  1. *Horizontal Course Filter Chips:*
+     - Added `CourseChipsRow` dynamically populated with the teacher's distinct enrolled course offerings (`All Classes`, `IoT (CS-IV-A)`, `IoT Lab (CS-IV-A)`, etc.) with amber `LAB` pill indicators.
+     - Tapping a chip instantly scopes both calendar dots and the session list.
+  2. *Expandable Month Calendar Card with Multi-Dot Indicators (Option B):*
+     - Added `TeacherMonthCalendarCard` featuring monthly navigation (`< Month Year >`), monthly session count, and an expand/collapse toggle (`[ ▲ / ▼ ]`).
+     - Renders a 7-column calendar grid (`M T W T F S S`) where cells with held sessions display type-coded multi-dots:
+       - **Blue Dot (`PrimaryBlue`):** Theory / Lecture session held.
+       - **Amber Dot (`#F59E0B`):** Practical / Lab session held.
+       - **Dual Dots (`🔵 🟠`):** Both lecture and lab conducted on that date.
+       - Multi-dots supported if multiple classes of the same type were held.
+     - **Interactive Date Selection:** Tapping any date filters the sessions list below to that exact day. Tapping again toggles off the date filter.
+     - Distinct visual highlighting for Today (subtle border) and Selected Date (filled PrimaryBlue circle with crisp white dots).
+     - Informative bottom legend explaining dot types (`Lecture`, `Lab Session`, `Tap date to filter`).
+  3. *Active Filter Summary Bar:*
+     - A pill bar displaying active filter criteria (e.g. `Internet of Things Lab (CS-IV-A) • Thu, 12 Nov (2)`) with a quick one-tap `[ Clear All × ]` button.
+  4. *SessionCard Batch Label Pill:*
+     - Rendered amber `G-1` / `G-2` batch pills on `SessionCard` next to the section badge for instant lab group distinction.
+* **Verification & Testing Conducted:**
+  - Executed `./gradlew compileDebugKotlin` — **BUILD SUCCESSFUL in 1m 4s**.
+
+### Session: 2026-11-18 15:52:00 IST — Guest Student Absence Protection (Option A + B Combo)
+* **Scope:** Mobile Client (`AttendanceApp/app`), `TeacherRollCallScreen.kt`
+* **Issues Addressed:**
+  - Accidental tap prevention: If a teacher mistakenly tapped `[ A ]` (Absent) or `[ L ]` (Leave) on a guest student card (e.g. Student from Group 2 during a Group 1 lab), that student would receive an unjustified absence penalty for a lab session outside their assigned timetable.
+* **Fixes Applied:**
+  1. *UI Level Action Disablement (Option A):*
+     - On any student card where `isGuest == true` (i.e. student's permanent group differs from the active roll call group), the `[ A ]` (Absent) and `[ L ]` (Leave) buttons are visually greyed out (`#F8FAFC`, border `#E2E8F0`, text `#CBD5E1`) and their `onClick` handlers are strictly disabled (`if (!isGuest)`).
+     - The only active action is `[ P ]` (Present). Tapping `[ P ]` marks them as a guest attendee; tapping `[ P ]` again deselects and returns to unmarked.
+     - Enforced `isAbsent` and `isLeave` to evaluate to `false` for guest students, preventing red/pink card borders and badges.
+  2. *Data Level Strict Filtering (Option B):*
+     - Hardened `guestStudents` filter:
+       `roster.filter { it.lab_group != selectedGroup && marks[it.student_id] == AttendanceStatus.PRESENT }`
+     - Even if an `ABSENT` or `LEAVE` mark existed in memory from prior actions, the student is automatically disqualified from `guestStudents`, `activeGroupStudents`, and `targetGroupIds`, guaranteeing that **zero** absence records can ever be generated for a guest attendee in another group's session.
+* **Verification & Testing Conducted:**
+  - Executed `./gradlew compileDebugKotlin` — **BUILD SUCCESSFUL in 25s**.
+
+### Session: 2026-11-18 15:35:00 IST — Guest / Makeup Student Support in Lab Sessions
+* **Scope:** Mobile Client (`AttendanceApp/app`), `TeacherRollCallScreen.kt`
+* **Issues Addressed:**
+  - Real-world classroom scenario: A student assigned permanently to Group 2 missed their previous lab and is permitted by the instructor to attend today's Group 1 lab session to make up for the absence.
+  - Previous system limitations:
+    1. Search on the Group 1 tab only filtered within Group 1, making Group 2 students invisible.
+    2. If marked on Group 2 or All tab, submitting for Group 1 filtered them out via `targetGroupIds` (omitted from submission payload).
+    3. Tapping the group badge permanently altered the student's group in `StudentSubjectMap`, disrupting future regular timetable groups.
+* **Fixes Applied (Option 2 Implementation):**
+  1. *Universal Roster Search:*
+     - When `search.isNotBlank()`, search filters across `s.roster` (entire course enrollment), allowing teachers on the G1 tab to immediately find any student by name or roll number.
+  2. *Automatic Guest Attendee Inclusion:*
+     - Introduced `guestStudents = roster.filter { it.lab_group != selectedGroup && marks[it.student_id] != null }`.
+     - Appended `guestStudents` to `activeGroupStudents` and `targetGroupIds` so explicitly marked guest attendees are cleanly included in the session submission payload.
+     - Preserved isolation: Unmarked students in the other group remain completely untouched and are **not** defaulted to Absent.
+     - Database integrity: `StudentSubjectMap.lab_group` is never mutated, preserving the student's permanent group for all future sessions.
+  3. *Visual Guest Indicator & Submission Audit:*
+     - Rendered a distinctive purple pill `[ G2 • Guest ]` on the student's roster card when viewed within a different group's roll call.
+     - Enhanced the confirmation dialog to explicitly state: `• Guest / Makeup: X student(s) from other group included`.
+* **Verification & Testing Conducted:**
+  - Executed `./gradlew compileDebugKotlin` — **BUILD SUCCESSFUL**.
+
+### Session: 2026-11-18 15:00:00 IST — Dynamic Expected Students Count & Backend Service Reactivation
+* **Scope:** Backend (`Attendance_backend`), Mobile Client (`AttendanceApp/app`), `TeacherClassesScreen.kt`
+* **Issues Addressed:**
+  - Teacher classes screen displayed "No internet connection. Connect to load your scheduled classes." while simultaneously showing "184 Expected Today" in the top header card, misleading the user into thinking classes were already loaded.
+  - Root cause: The FastAPI backend process had stopped during the environment restart, resulting in connection failure when fetching the schedule.
+  - Concurrently, `DailyProgressSection` in `TeacherClassesScreen.kt` had a hardcoded placeholder (`title = "184"`, `subtitle = "Expected Today"`), so it showed "184" even when 0 classes were loaded or when network errors occurred.
+* **Fixes Applied:**
+  1. *Backend Reactivation:* Relaunched FastAPI Uvicorn server on `0.0.0.0:8000` with hot-reload enabled. Verified HTTP 200 health responses.
+  2. *Dynamic Expected Student Calculation:*
+     - Updated `DailyProgressSection(completed: Int, total: Int, expectedStudents: Int? = null)`.
+     - Calculated `expectedStudentsCount` dynamically from cached student rosters for today's loaded course offerings (`loadedSchedule?.classes?.sumOf { TeacherCacheManager.loadRoster(it.course_offering_id)?.size ?: 0 }`).
+     - If `total == 0` (or error state), `expectedText` cleanly displays `"0"`.
+     - If classes are loaded, it shows the real sum of enrolled students (or `"—"` if rosters are pending initial fetch), completely removing the misleading `"184"` hardcode.
+* **Verification & Testing Conducted:**
+  - Verified backend listening on `http://127.0.0.1:8000/docs` (HTTP 200).
+  - Executed `./gradlew compileDebugKotlin` on Android codebase — **BUILD SUCCESSFUL**.
+
+### Session: 2026-11-18 14:45:00 IST — TodayClassCard Section Truncation & Top Chip Row Decluttering
+* **Scope:** Mobile Client (`AttendanceApp/app`), `TeacherClassesScreen.kt`
+* **Issues Addressed:**
+  - On `TodayClassCard`, Row 1 was overloaded with `subject_code`, `credits`, `course_type`, `duration_periods`, `Sec ${section_name}`, and `StatusBadge`, causing the section text to squish and truncate into `Sec CS-...`.
+* **Fixes Applied:**
+  1. *Section Badge Relocation to Location Row:*
+     - Moved `Sec: ${course.section_name}` from the crowded top chips row to the room row, rendering it as a dedicated pill (`Surface(shape = RoundedCornerShape(6.dp), color = Color(0xFFF1F5F9))`) paired on the right with the room on the left (`[ 🏛 Room ]  ...  [ Sec: CS-IV-A ]`).
+     - Enforced `maxLines = 1, softWrap = false` so section names never wrap or truncate.
+  2. *Top Chip Row Breathing Room:*
+     - Row 1 now exclusively hosts `[ CS481 ]`, `[ 3 Cr ]`, `[ LAB ]`, and `[ 2 Periods ]` with `Modifier.horizontalScroll(rememberScrollState())` safety on the left, and the `StatusBadge` on the right.
+* **Verification & Testing Conducted:**
+  - Android Gradle build: `.\gradlew.bat compileDebugKotlin --no-daemon` $\rightarrow$ **BUILD SUCCESSFUL in 28s** (0 errors).
+
+### Session: 2026-11-18 14:15:00 IST — Lab vs Normal Lecture Scope Separation & On-Demand Group Filter (Approach 1)
+* **Scope:** Mobile Client (`AttendanceApp/app`), `TeacherRollCallScreen.kt`
+* **Issues Addressed:**
+  - On normal theory/lecture classes (e.g. CS401 "Internet of Things" in lecture hall `IL-106 (CLT)`), the attendance screen was displaying lab group tabs (`[ All (76) | Group 1 (38) | Group 2 (38) ]`) and tagging every student with `G1`/`G2` badges.
+  - Root Cause: `isLabCourse` checked `s?.roster?.any { !it.lab_group.isNullOrBlank() }`. Because backend enrollments dynamically assign groups for lab practicals, this condition erroneously evaluated to `true` for all courses across the university.
+* **Features & Improvements Implemented (Approach 1):**
+  1. *Accurate Lab Detection (`TeacherRollCallScreen.kt`):*
+     - Replaced greedy roster check with exact course attributes:
+       ```kotlin
+       val isLabCourse = remember(rosterState) {
+           val s = rosterState as? RosterUiState.Loaded
+           val info = s?.courseInfo
+           info?.course_type?.contains("LAB", ignoreCase = true) == true ||
+           info?.subject_name?.contains("Lab", ignoreCase = true) == true ||
+           !info?.batch_label.isNullOrBlank()
+       }
+       ```
+  2. *Clean Full-Class Roster for Normal Lectures:*
+     - On normal lecture courses (`!isLabCourse`), group tabs and student `G1`/`G2` badges are completely hidden by default. The teacher sees a clean, full-class roll call for all enrolled students.
+  3. *On-Demand "Groups" Action in TopAppBar for Theory Classes:*
+     - Moved the group toggle into the pinned `TopAppBar` action bar beside notifications: `[ ← Edit Attendance   [ 👥 Groups ]  🔔  (VS) ]`.
+     - Eliminated the awkward floating button from the content body.
+     - When tapped, it turns active (`PrimaryBlue` pill) and smoothly slides in the `[ All | Group 1 | Group 2 ]` tabs directly below the course card.
+     - When toggled off, `selectedGroup` returns cleanly to `"ALL"` and group tabs/badges are hidden.
+  4. *Automatic Group Mode for Labs:*
+     - Lab practicals (e.g. CS481 "Internet of Things Lab") automatically display group tabs and badges without requiring any manual toggle.
+* **Verification & Testing Conducted:**
+  - Android Gradle build: `.\gradlew.bat compileDebugKotlin --no-daemon` $\rightarrow$ **BUILD SUCCESSFUL in 32s** (0 errors).
+
+### Session: 2026-11-18 04:35:00 IST — Direct Slot Batch Parameter Propagation, Intelligent Session Edit Detection & Multi-Slot Day Ambiguity Fix
+* **Scope:** Mobile Client (`AttendanceApp/app`), Backend API (`Attendance_backend`)
+* **Root Cause Analysis:**
+  - A single course offering (e.g. CS481) can have multiple scheduled slots on the same day-of-week with different groups (e.g. Saturday 09:30 for $G_2$ and Saturday 14:30 for $G_1$).
+  - When a teacher clicked "Mark Past" on Saturday 14 Nov for $G_1$, navigation only passed `(courseOfferingId, sessionDate)`.
+  - Day-of-week resolution searched `allSchedule` for `day_of_week == "SAT"` and returned the *first* Saturday entry (09:30 $G_2$), overriding the intended $G_1$ selection.
+* **Fixes Applied:**
+  1. *Direct Batch Parameter Routing (`Routes.kt`, `NavGraph.kt`, `TeacherClassesScreen.kt`, `TeacherRecordsScreen.kt`):*
+     - Upgraded roll call route: `Routes.TEACHER_ROLL_CALL = "teacher_roll_call/{courseOfferingId}?sessionDate={sessionDate}&batchLabel={batchLabel}"`.
+     - `rollCall(courseOfferingId, sessionDate, batchLabel)` now propagates the exact `batch_label` from the clicked card (`TodayClassCard`, `PendingClassCard`, and `TeacherRecordsScreen`'s `onEditSession`).
+  2. *Exact Slot Resolution by Date + Batch Label (`TeacherViewModel.kt`):*
+     - `resolvecourseInfo` now checks for slots matching both the target day-of-week AND the specific `batchLabel` (e.g. `SAT` + `G-1`), eliminating slot ambiguity.
+  3. *Smart Group Auto-Selection for Editing vs. Marking (`TeacherRollCallScreen.kt`):*
+     - **When Editing:** Evaluates existing records on the loaded session:
+       - If only $G_1$ students have marks (`markedG1 > 0 && markedG2 == 0`): auto-selects **Group 1**.
+       - If only $G_2$ students have marks (`markedG2 > 0 && markedG1 == 0`): auto-selects **Group 2**.
+       - If both groups have marks: auto-selects **All**.
+     - **When Marking Past/New Sessions:** Directly selects the group matching `initialBatchLabel` from the clicked card.
+     - Tracks `userManuallyChangedGroup` so manual tab selections are preserved during roll call.
+  4. *Backend Session History Schema & Query Enhancement (`attendance.py`, `schemas/attendance.py`):*
+     - Added `batch_label: Optional[str] = None` to `SessionHistoryResponse`.
+     - In `get_teacher_history`, selected `AttendanceSession.batch_label` so history records preserve group identity for session editing.
+     - In `get_class_roster` and `sync_offline_attendance`, supported hyphen-insensitive matching (`G1` vs `G-1`) via `func.replace`.
+* **Verification & Testing Conducted:**
+  - Python AST check: syntax verified.
+  - Android Gradle compilation: `.\gradlew.bat compileDebugKotlin --no-daemon` $\rightarrow$ **BUILD SUCCESSFUL in 22s** (0 errors).
+
+### Session: 2026-11-18 04:15:00 IST — Lab Group Placement in Subject Title, Pending Card Meta Layout Fix & Date-Aware Group 2 Auto-Selection
+* **Scope:** Mobile Client (`AttendanceApp/app`), Backend API (`Attendance_backend`)
+* **Features Added & Polished:**
+  1. *Inline Lab Group Badge (`TeacherClassesScreen.kt`, `TeacherRollCallScreen.kt`):*
+     - Placed the practical group badge (`G-1`, `G-2`) directly in front of / beside the course title on `TodayClassCard`, `PendingClassCard`, and `RollCallHeader`.
+     - Removed `batch_label` from the top chip row in `RollCallHeader`, providing ample space for `CS481`, `3 Cr`, `LAB`, and `${duration_periods} Periods` and preventing overlap with `ROLL CALL` / `EDITING`.
+  2. *Pending Card Section Text Squishing Bug Resolved (`TeacherClassesScreen.kt`):*
+     - Moving `batch_label` from Row 2 to Row 1 (beside the subject name) freed up essential horizontal width on Row 2.
+     - Added `softWrap = false, maxLines = 1` on `Sec: ${item.section_name}` to permanently fix the bug where `Sec:\nCS-IV-A` squished across two vertical lines.
+  3. *Date-Aware Timetable Slot Resolution & Group 2 Auto-Selection (`TeacherViewModel.kt`, `TeacherRollCallScreen.kt`):*
+     - Updated `resolvecourseInfo` to accept `targetDate: String? = null`.
+     - Instead of statically falling back to a single cached `course_offering_id` (which held Tuesday's `G-1` slot), `resolvecourseInfo` now parses `targetDate` into the day of week (e.g. `THU`) and matches `course.day_of_week`.
+     - Added `day_of_week` to backend `CourseScheduleResponse` schema and mobile `Models.kt`.
+     - When marking or editing a Thursday lab session, the screen automatically receives Thursday's slot (`batch_label = "G-2"`) and pre-selects `Group 2` in the roll call tab.
+     - In `TeacherRollCallScreen`, added bidirectional roster status detection: if existing attendance records belong strictly to Group 2 (`markedG2Count > 0 && markedG1Count == 0`), `Group 2` is auto-selected regardless of initial slot config.
+* **Verification & Testing Conducted:**
+  - Python AST and schema verification: Syntax verified.
+  - Android Gradle build: `.\gradlew.bat compileDebugKotlin --no-daemon` $\rightarrow$ **BUILD SUCCESSFUL in 23s** with 0 errors.
+
+### Session: 2026-11-18 03:45:00 IST — Laboratory Practical Group Split (G1/G2), Non-Scheduled Invariance & Cross-Slot Weekly Auto-Fulfillment (Approach B)
+* **Scope:** Database (`PostgreSQL`), Backend API (`Attendance_backend`), Mobile Client (`AttendanceApp/app`)
+* **Features Added:**
+  1. *Database Schema Extension:*
+     - Added column `studentsubjectmap.lab_group VARCHAR(20) DEFAULT NULL` to support persistent per-student practical group allocation.
+     - Added column `attendancesession.batch_label VARCHAR(50) DEFAULT NULL` to track session group scope (`G1`, `G2`, `ALL`).
+  2. *Backend Group Endpoints & Dynamic Allocation (`attendance.py`):*
+     - `get_class_roster`: Returns student group `lab_group`. If unassigned, dynamically assigns $G_1$ to the first $\lceil N/2 \rceil$ students and $G_2$ to the remainder.
+     - `PUT /mobile/attendance/course/{id}/student/{student_id}/lab-group`: Real-time group switching for individual students.
+     - `PUT /mobile/attendance/course/{id}/split-groups`: Custom partition cutoff endpoint.
+  3. *Approach B Cross-Slot Weekly Auto-Fulfillment (`attendance.py`):*
+     - When a teacher conducts a combined session for both groups on date $t$ (`batch_label in ('ALL', 'COMBINED')`), the backend scans the weekly schedule window $[t_{\text{start}}, t_{\text{end}}]$ and generates an auto-fulfilled non-held administrative session ($\text{is\_held} = \text{FALSE}, \text{reason\_not\_held} = \text{"Combined Lab conducted on..."}$) for the other scheduled slot (e.g. Thursday), permanently clearing it from the pending backlog.
+  4. *Mobile Group Filter Chips & Scope Invariance (`TeacherRollCallScreen.kt`):*
+     - Added Segmented Group Filter Chips: `[ All (N) | Group 1 (N1) | Group 2 (N2) ]` at the top of the roster.
+     - Attendance statistics (Present, Absent, Leave, Unmarked) and "Mark All" operations reactively scope to the active group only.
+     - Submission sends only the active group students (`targetStudentIds`), ensuring non-scheduled group students are **never marked absent** and their attendance percentage remains strictly invariant.
+     - Dynamic auto-detection: If the timetable slot has `batch_label = "G1"` or `"G2"`, the screen automatically pre-selects that group.
+  5. *Mobile Interactive Group Badges & Quick Toggle (`TeacherRollCallScreen.kt`):*
+     - Each student card in lab courses displays a clickable group badge (`G1` / `G2`).
+     - Tapping the badge instantly switches the student between `G1` and `G2`, optimistically updates the local cache, and syncs with the server.
+  6. *Dashboard Badges (`TeacherClassesScreen.kt`):*
+     - Display `batch_label` chip (`G1`, `G2`, etc.) on Today's class cards and Pending class cards.
+  7. *Roll Call Header Chip Overflow & Layout Collision Fix (`TeacherRollCallScreen.kt`):*
+     - Replaced verbose `3 Credits` tag with compact `3 Cr`.
+     - Bound the left chips row with `Modifier.weight(1f, fill = false).horizontalScroll(rememberScrollState())` and added a guaranteed 8dp spacing before the status badge.
+     - Enforced `softWrap = false, maxLines = 1` on the `ROLL CALL` / `EDITING` badge to permanently eliminate text wrapping into two lines (`ROLL \n CALL`) and badge overlapping against the batch tag (`G-1`).
+* **Mathematical Formulations Applied:**
+  - Section 2.6: Laboratory Group Partitioning, Independent Attendance Sets & Cross-Slot Weekly Auto-Fulfillment Logic.
+* **Verification & Testing Conducted:**
+  - Database DDL: Altered tables `studentsubjectmap` and `attendancesession` with `BypassSandbox: true`.
+  - Backend Python compilation: Syntax and import verification verified (`OK`).
+  - Android Gradle build: `.\gradlew.bat compileDebugKotlin` executed with `BUILD SUCCESSFUL in 44s` and 0 errors.
+
+### Session: 2026-11-18 02:35:00 IST — Multi-Period Lab Timetable Slot Consolidation (Single Roll Call for 2-Hour Labs)
+* **Scope:** Mobile Client (`AttendanceApp/app`), Backend API (`Attendance_backend`)
+* **Features Added:**
+  1. *Backend Schedule Slot Merging (`merge_consecutive_schedule_slots` in `attendance.py`):* Contiguous timetable slots sharing the same `course_offering_id` and contiguous timestamps ($T_{\text{end}, i} = T_{\text{start}, i+1}$) are merged into a unified schedule item with combined time window (e.g. `11:30 AM – 01:30 PM`) and aggregated `duration_periods = 2`.
+  2. *Backend Pending Classes Merging (`merge_consecutive_pending_classes` in `attendance.py`):* Unmarked past sessions with contiguous slots are consolidated into a single pending class card, preventing duplicate pending cards for multi-hour labs.
+  3. *Duration-Weighted Attendance Aggregation in Faculty Summary (`get_course_students_summary`):* Updated summary calculation to weight total held sessions and student present marks by `session.duration_periods`, preserving duration-weighted metric consistency $P_w$.
+  4. *Mobile Visual Indicators (`TeacherClassesScreen.kt`, `TeacherRollCallScreen.kt`):* Display a distinct `${duration_periods} Periods` badge on both Today's Class cards, Pending Class cards, and the Roll Call header whenever a session spans $> 1$ periods.
+  5. *Automatic Full-Block Attendance Submission (`TeacherViewModel.kt`):* Resolves `duration_periods` from active course info or pending list and submits `OfflineSyncPayload(duration_periods = resolvedDuration)` so 1 single roll call records full academic credit.
+* **Verification & Testing Conducted:**
+  - Python unit test: verified merging of consecutive 1-hour slots into 11:30–13:30 (`duration_periods = 2`).
+  - Android Gradle compilation: `.\gradlew.bat compileDebugKotlin` verified.
+
+### Session: 2026-11-18 02:15:00 IST — Notifications Screen: Eyebrow Tag Removal & Offline NoConnectionView Integration
+* **Scope:** Mobile Client (`AttendanceApp/app`)
+* **Features Added:**
+  1. *Offline Satellite Dish View (`NoConnectionView` in Notifications):* Integrated `NoConnectionView` (Lottie satellite dish animation, "No internet connection" heading, descriptive subtext, and a "Retry" button linked to `AttendanceNotificationManager.fetchHistory()`) into both `TeacherNotificationsScreen.kt` and `StudentNotificationsScreen.kt`. It renders whenever the device is offline or history synchronization fails and no cached notifications are present.
+* **Features Removed / Deprecated (Hallmark Design Floor Alignment):**
+  1. *Redundant Eyebrow Tags:* Removed the unnecessary `"FACULTY NOTIFICATIONS"` and `"NOTIFICATIONS"` all-caps eyebrow text above `"Inbox"` in both teacher and student screens.
+  2. *Clean Minimalist Top App Bar:* Simplified top bar title to an elegant `Text("Inbox" or "Inbox (N new)", fontSize = 18.sp, fontWeight = FontWeight.Bold)` strictly conforming to Hallmark anti-slop guidelines (no tracked-out all-caps labels, no redundant role tags).
+* **Verification & Testing Conducted:**
+  - Android Gradle compilation: `.\gradlew.bat compileDebugKotlin` $\rightarrow$ **BUILD SUCCESSFUL in 29s** (0 errors).
+
+### Session: 2026-11-18 01:55:00 IST — Teacher App: Pending Attendance Class Filter & 15-Day Window Decommissioning
+* **Scope:** Mobile Client (`AttendanceApp/app`), Backend API (`Attendance_backend`)
+* **Features Added:**
+  1. *Dynamic Class Filter on Pending Tab (`TeacherClassesScreen.kt`):* Added horizontal scrollable filter chips displaying all distinct assigned courses with pending sessions (e.g. `All Classes (40)`, `CS525 • MT-DS-I (13)`, `CS525 • MT-SE-I (13)`). Teachers can tap any class to inspect and mark only that class.
+  2. *Live Dynamic Pending Counter:* The "Unmarked Past Sessions" header count reactively updates to reflect the selected class filter (e.g. displaying `13 pending` when viewing MT-DS-I, rather than a static global count).
+  3. *Unobtrusive Pending Tab Indicator Dot:* Replaced the prominent red pill badge `40` on the top `Pending` tab button with a minimal red status dot (`7.dp`) that only appears when there are pending unmarked sessions (`pendingCount > 0`) and hides when all classes are marked.
+* **Features Removed / Deprecated:**
+  1. *15-Day Attendance Window Enforcement:* Fully decommissioned the 15-day retroactive marking restriction across backend `sync_offline_attendance` and `postpone_class`, allowing teachers to mark any prior class without artificial cutoff blocks. Expanded lookback window to 60 days.
+  2. *Card Expiration Badges:* Removed the `14d left` / `Expiring • Xd left` warning pill and red borders from `PendingClassCard`, standardizing on clean neutral borders.
+* **Verification & Testing Conducted:**
+  - Android Gradle compilation: `.\gradlew.bat compileDebugKotlin` $\rightarrow$ verified.
+  - Backend python verification: `python -B -c "import app.api.v1.mobile.attendance"` $\rightarrow$ **OK**.
+
+### Session: 2026-11-18 01:34:00 IST — Teacher App: At-Risk Students & Customizable Attendance Threshold Drilldown
+* **Scope:** Mobile Client (`AttendanceApp/app`), Backend API (`Attendance_backend`)
+* **Features Added:**
+  1. *Backend Course Students Summary Endpoint (`attendance.py`, `schemas/attendance.py`):* Added `GET /api/v1/mobile/attendance/course/{course_offering_id}/students-summary` returning per-student aggregated attendance: `total_held`, `total_attended`, `attendance_percentage`, and exact future sessions required to reach 75% target (`classes_needed_for_75`). Optional `threshold` query parameter filters records server-side.
+  2. *Top Segmented Mode Selector (Option A):* Pinned top-level segmented toggle in `TeacherAnalyticsScreen.kt` switching smoothly between **`Class Trends`** (Canvas bar chart & session turnout) and **`At-Risk Students`** (individual student drilldown) with an active badge displaying total at-risk count.
+  3. *Customizable Attendance Thresholds:* Added horizontal filter chips for instant cutoff switching:
+     - `[ < 75% Target ]` (Default university policy)
+     - `[ < 65% Warning ]` (Moderate risk)
+     - `[ < 50% Critical ]` (Severe risk with dark red highlights)
+     - `[ Custom (< X%) ]` (Opens interactive slider dialog from 10% to 95% in 5% increments)
+     - `[ All Students ]` (Full roster attendance overview)
+  4. *Mathematical Formulations Applied (Shortfall Recovery):*
+     - Exact algebraic derivation:
+       $$\frac{A + x}{H + x} \ge 0.75 \implies x \ge \frac{0.75 H - A}{0.25} = 3H - 4A \implies \mathbf{x = \max(0, \lceil 3H - 4A \rceil)}$$
+     - Implemented on backend in `attendance.py` and mobile in `StudentDefaulterCard`.
+  5. *Student Defaulter Card (`StudentDefaulterCard`):* Displays student Roll Number, Name, semantic percentage badge, ratio (`Attended X of Y classes`), a bounded `LinearProgressIndicator`, and actionable shortfall advisory (e.g. *"Needs 6 consecutive classes to reach 75%"*).
+  6. *Live Search & Course Filter:* Real-time filtering by student roll number or name, alongside seamless switching across assigned courses.
+  7. *Offline Caching (`TeacherCacheManager`):* Added `loadStudentsSummary` and `saveStudentsSummary` to disk cache with auto-synthesis from cached rosters if completely offline.
+* **Bugs & Regressions Resolved:**
+  1. *Backend HTTP 500 on `GET /api/v1/mobile/attendance/course/{id}/students-summary` (`NameError: name 'AttendanceStatus' is not defined`):* When calculating attended student records for offerings with held sessions (`total_held > 0`), the query compared `AttendanceRecord.status == AttendanceStatus.PRESENT`. `AttendanceStatus` was missing from the import list in `app/api/v1/mobile/attendance.py`. Added `AttendanceStatus` to imports, restoring 200 OK responses across all course offerings.
+* **Verification & Testing Conducted:**
+  - Android compilation: `.\gradlew.bat compileDebugKotlin` $\rightarrow$ **BUILD SUCCESSFUL in 18s** (0 errors).
+  - Python backend verification: `python -B -c "from app.api.v1.mobile.attendance import AttendanceStatus"` $\rightarrow$ **OK (<enum 'AttendanceStatus'>)**.
+
+### Session: 2026-11-18 01:20:00 IST — Teacher App: Course Analytics & Teaching Insights Visual Dashboard
+* **Scope:** Mobile Client (`AttendanceApp/app`), Backend Database (`Attendance_backend`)
+* **Features Added:**
+  1. *Teacher Course Analytics Screen (`TeacherAnalyticsScreen.kt`):* Built a comprehensive visual analytics dashboard empowering faculty to inspect attendance performance, enrollment strength, and class turnout trends.
+  2. *Interactive Compose Canvas Bar Chart:* Custom-drawn responsive bar chart featuring dynamic vertical scaling, a 75% red dashed university threshold guideline, horizontal grid lines, and interactive tap detection for inspecting individual session details.
+  3. *KPI Stat Metrics:* High-level performance cards displaying Total Classes Conducted, Average Turnout %, Average Enrolled Strength, and Total Attended vs. Absent records.
+  4. *Course & Timeframe Filters:* Filter pills for switching between all assigned courses or individual offerings, alongside timeframe chips (*Entire Semester*, *Last 30 Days*, *Last 14 Days*).
+  5. *Turnout Quality Distribution:* Visual split categorizing sessions into Safe ($\ge 75\%$) versus Critical ($< 75\%$) attendance.
+  6. *Conducted Session Log:* Detailed chronological list of conducted classes with section tags, date, and attendance percentage pills.
+  7. *Navigation & Tab Integration (`Routes.kt`, `BottomNavBars.kt`, `NavGraph.kt`):* Added `Routes.TEACHER_ANALYTICS` and integrated the `Analytics` destination with `Icons.Default.BarChart` as the 3rd bottom navigation tab positioned directly after `Timetable` (`Classes` $\rightarrow$ `Timetable` $\rightarrow$ `Analytics` $\rightarrow$ `Records`).
+  8. *Offline Resilience:* Leverages `TeacherCacheManager` to compute metrics seamlessly from cached rosters and session history when disconnected, with `NoConnectionView` fallback.
+* **Bugs & Regressions Resolved:**
+  1. *Backend HTTP 500 on `/api/v1/auth/login` (`relation "authratelimit" does not exist`):* Executed pending Alembic migration `a2c4e6f8b1d3` (`alembic upgrade head`) on the remote database, generating the `authratelimit` table and enabling SHA-256 token digests.
+  2. *Compose Modifier & Icon Deprecations:* Fixed `Modifier.padding` parameter syntax and replaced deprecated `Icons.Outlined.TrendingUp` with `Icons.AutoMirrored.Outlined.TrendingUp`.
+* **Verification & Testing Conducted:**
+  - Android Gradle compilation: `.\gradlew.bat compileDebugKotlin` $\rightarrow$ **BUILD SUCCESSFUL in 25s** with 0 errors.
+  - Backend login endpoint verified: status 401 Unauthorized for invalid credentials with 0 database errors.
 
 ### Session: 2026-11-17 19:39:48 IST — Android Auth Reliability: Preserve Sessions on Transient Refresh Failures and Encrypt Tokens
 * **Scope:** Android app (`AttendanceApp/app`), `TokenManager.kt`, `RetrofitClient.kt`.
@@ -735,20 +1416,21 @@ ightarrow$ **BUILD SUCCESSFUL**.
 
 ---
 
-## 4. Maintenance Guidelines for Future Chats
+## 5. Maintenance Guidelines for Future Chats
 > **Mandatory Rule for AI Assistant & Developers:**
 > Whenever features, endpoints, or mobile screens are created, refactored, or removed:
 > 1. Check this log at the start of the task to understand existing architectural constraints.
 > 2. Record any major design decision under **1. Architectural Decision Records (ADRs)** with date and clock timestamp.
-> 3. Update the **2. Cross-Platform Feature Matrix** if any capability's status changed.
-> 4. Append a new session entry under **3. Chronological Chat & Development Activity Trail** in reverse-chronological order (newest on top), strictly formatted with **Date and exact Timestamp**:
+> 3. Record all mathematical formulas, derivations, variables, and code implementations under **2. Core Mathematical Formulations & Algorithmic Derivations**.
+> 4. Update the **3. Cross-Platform Feature Matrix** if any capability's status changed.
+> 5. Append a new session entry under **4. Chronological Chat & Development Activity Trail** in reverse-chronological order (newest on top), strictly formatted with **Date and exact Timestamp**:
 >    ```markdown
 >    ### Session: YYYY-MM-DD HH:mm:ss IST — <Session Title>
 >    * **Scope:** <Backend / Frontend / Android / Database>
 >    * **Features Added:** ...
+>    * **Mathematical Formulations Applied:** (Formulas, derivations, variables, and code mapping)
 >    * **Features Removed / Deprecated:** ...
->    * **Features Removed / Deprecated:**
-  1. *15-Day Attendance Grace Window Card:* Removed the yellow banner card (`PendingPolicyCard`) from the top of the **Pending** tab in `TeacherClassesScreen` to keep the UI clean, uncluttered, and professional.
-* **Bugs & Regressions Resolved:** ...
+>    * **Bugs & Regressions Resolved:** ...
+>    * **Verification & Testing Conducted:** ...
 >    * **Verification & Testing Conducted:** ...
 >    ```

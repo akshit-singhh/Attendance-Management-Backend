@@ -19,6 +19,8 @@ from app.schemas.student import (
     CalendarClassItem,
     CalendarDayData,
     StudentCalendarResponse,
+    StudentClassSessionItem,
+    StudentSubjectHistoryResponse,
 )
 
 # --- ENDPOINTS ---
@@ -46,6 +48,7 @@ async def get_student_dashboard(
             Subject.name.label("subject_name"),
             Subject.course_code,
             User.full_name.label("teacher_name"),
+            StudentSubjectMap.lab_group.label("lab_group"),
             # Total periods held (Weighting the duration)
             func.sum(
                 case(
@@ -86,7 +89,7 @@ async def get_student_dashboard(
         )
         .where(StudentSubjectMap.student_id == student_id)
         .where(CourseOffering.term_id == target_id)
-        .group_by(Subject.name, Subject.course_code, User.full_name)
+        .group_by(Subject.name, Subject.course_code, User.full_name, StudentSubjectMap.lab_group)
     )
     
     results = await db.exec(statement)
@@ -132,7 +135,8 @@ async def get_student_dashboard(
                 periods_held=periods_held,
                 periods_attended=periods_attended,
                 percentage=round(percentage, 1),
-                standing=standing
+                standing=standing,
+                lab_group=row.lab_group
             )
         )
 
@@ -383,3 +387,134 @@ async def get_student_calendar(
         total_missed=month_missed,
         days=days_dict,
     )
+
+
+@router.get("/subject/{course_code}/history", response_model=StudentSubjectHistoryResponse, tags=["Mobile Student API"])
+async def get_student_subject_history(
+    course_code: str,
+    student_id: int = Depends(require_student),
+    db: AsyncSession = Depends(get_session)
+):
+    """
+    Returns complete chronological attendance history of all sessions conducted for a subject.
+    Allows students to see every single class session, whether attended or missed, with time and room details.
+    """
+    stmt = (
+        select(CourseOffering, Subject, User.full_name.label("teacher_name"), StudentSubjectMap.lab_group)
+        .join(Subject, CourseOffering.subject_id == Subject.id)
+        .join(User, CourseOffering.teacher_id == User.id)
+        .join(StudentSubjectMap, StudentSubjectMap.course_offering_id == CourseOffering.id)
+        .where(StudentSubjectMap.student_id == student_id)
+        .where(func.lower(Subject.course_code) == course_code.strip().lower())
+    )
+    res = (await db.exec(stmt)).all()
+    if not res:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Subject '{course_code}' not found or student is not enrolled."
+        )
+
+    primary_offering, primary_subj, primary_teacher, lab_group = res[0]
+    offering_ids = [r[0].id for r in res]
+
+    tt_entries = (await db.exec(
+        select(TimetableEntry).where(TimetableEntry.course_offering_id.in_(offering_ids))
+    )).all()
+    tt_by_dow = {e.day_of_week: e for e in tt_entries}
+
+    sess_stmt = (
+        select(AttendanceSession, User.full_name.label("session_teacher"))
+        .outerjoin(User, AttendanceSession.teacher_id == User.id)
+        .where(AttendanceSession.course_offering_id.in_(offering_ids))
+        .where(AttendanceSession.status == SessionStatus.SUBMITTED)
+        .order_by(AttendanceSession.date.desc(), AttendanceSession.id.desc())
+    )
+    sessions_res = (await db.exec(sess_stmt)).all()
+
+    session_ids = [s[0].id for s in sessions_res]
+    rec_by_session = {}
+    if session_ids:
+        rec_stmt = (
+            select(AttendanceRecord).where(
+                AttendanceRecord.session_id.in_(session_ids),
+                AttendanceRecord.student_id == student_id
+            )
+        )
+        records = (await db.exec(rec_stmt)).all()
+        rec_by_session = {r.session_id: r for r in records}
+
+    day_dow_map = {
+        0: DayOfWeek.MON, 1: DayOfWeek.TUE, 2: DayOfWeek.WED,
+        3: DayOfWeek.THU, 4: DayOfWeek.FRI, 5: DayOfWeek.SAT, 6: DayOfWeek.SUN
+    }
+
+    total_held = 0
+    total_attended = 0
+    sessions_list: List[StudentClassSessionItem] = []
+
+    for s, s_teacher in sessions_res:
+        dur = s.duration_periods or 1
+        rec = rec_by_session.get(s.id)
+
+        if not s.is_held:
+            st = "POSTPONED"
+        elif rec is not None:
+            st = rec.status.value if hasattr(rec.status, "value") else str(rec.status)
+        else:
+            st = "ABSENT"
+
+        if s.is_held:
+            total_held += dur
+            if st == "PRESENT":
+                total_attended += dur
+
+        dt = s.date
+        dow = day_dow_map.get(dt.weekday())
+        tt = tt_by_dow.get(dow)
+        time_disp = None
+        room = None
+        if tt:
+            start_str = tt.start_time.strftime("%I:%M %p") if hasattr(tt.start_time, "strftime") else str(tt.start_time)
+            end_str = tt.end_time.strftime("%I:%M %p") if hasattr(tt.end_time, "strftime") else str(tt.end_time)
+            time_disp = f"{start_str} - {end_str}"
+            room = tt.room
+
+        sessions_list.append(
+            StudentClassSessionItem(
+                session_id=s.id,
+                date=dt.isoformat(),
+                day_name=dt.strftime("%A"),
+                formatted_date=dt.strftime("%d %b %Y"),
+                status=st,
+                duration_periods=dur,
+                batch_label=s.batch_label,
+                teacher_name=s_teacher or primary_teacher,
+                room=room or "Classroom",
+                time_display=time_disp or (f"{dur} Period" + ("s" if dur > 1 else "")),
+                is_held=s.is_held,
+                reason_not_held=s.reason_not_held
+            )
+        )
+
+    pct = round((total_attended / total_held * 100.0), 1) if total_held > 0 else 0.0
+    standing = "Not Started"
+    if total_held > 0:
+        if pct >= 85:
+            standing = "Excellent"
+        elif pct >= 75.0:
+            standing = "Good Standing"
+        else:
+            standing = "Low Attendance"
+
+    return StudentSubjectHistoryResponse(
+        course_code=primary_subj.course_code,
+        subject_name=primary_subj.name,
+        teacher_name=primary_teacher,
+        lab_group=lab_group,
+        periods_held=total_held,
+        periods_attended=total_attended,
+        percentage=pct,
+        standing=standing,
+        sessions=sessions_list
+    )
+

@@ -97,6 +97,7 @@ class StudentSubjectMap(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     student_id: int = Field(foreign_key="user.id") 
     course_offering_id: int = Field(foreign_key="courseoffering.id")
+    lab_group: Optional[str] = Field(default=None) # e.g. "G1", "G2"
 
 class SubstituteGrant(SQLModel, table=True):
     """Time-limited permission letting a substitute mark attendance"""

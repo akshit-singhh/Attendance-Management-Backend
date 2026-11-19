@@ -493,6 +493,43 @@ async def get_student_timetable(
             }
         sec_map[key]["hours"] += 1.0
 
+    # Ensure all courses the student is officially enrolled in appear in the workload list
+    enrolled_stmt = (
+        select(CourseOffering, Subject, Section, User.full_name.label("teacher_name"))
+        .join(Subject, CourseOffering.subject_id == Subject.id)
+        .outerjoin(Section, CourseOffering.section_id == Section.id)
+        .outerjoin(User, CourseOffering.teacher_id == User.id)
+        .join(StudentSubjectMap, StudentSubjectMap.course_offering_id == CourseOffering.id)
+        .where(StudentSubjectMap.student_id == user_id)
+    )
+    enrolled_res = (await db.exec(enrolled_stmt)).all()
+
+    for off, subj, sec, t_name in enrolled_res:
+        subj_code = (subj.course_code or "").strip()
+        already_present = any(k[1].strip().upper() == subj_code.upper() for k in sec_map.keys())
+        if not already_present:
+            name_lower = (subj.name or "").lower()
+            code_lower = subj_code.lower()
+            if "lab" in name_lower or "lab" in code_lower or "practical" in name_lower:
+                act = "LAB"
+            elif "project" in name_lower:
+                act = "PROJECT"
+            elif "training" in name_lower:
+                act = "TRAINING"
+            else:
+                act = "COURSE"
+
+            sec_name = sec.name if sec else (sections[0] if sections else "Class")
+            key = (sec_name, subj_code, act)
+            sec_map[key] = {
+                "section_name": sec_name,
+                "subject_code": subj_code,
+                "subject_name": subj.name,
+                "activity": act,
+                "hours": 0.0,
+                "teacher_name": t_name or "Faculty",
+            }
+
     workload = [
         TeachingWorkloadItem(**w)
         for w in sorted(list(sec_map.values()), key=lambda r: (r["section_name"], r["subject_code"]))
