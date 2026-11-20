@@ -28,6 +28,7 @@ from app.schemas.auth import (
     ChangePasswordRequest,
     ForgotPasswordRequest,
     ResetPasswordRequest,
+    VerifyOtpRequest,
     SwitchRoleRequest,
     UserProfileResponse
 )
@@ -292,6 +293,44 @@ async def forgot_password(
     background_tasks.add_task(send_otp_email, to_email=target_email, otp=otp_code)
 
     return {"status": "success", "message": "If that account exists, an OTP has been sent."}
+
+@router.post("/verify-otp", status_code=status.HTTP_200_OK)
+async def verify_otp(
+    payload: VerifyOtpRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_session)
+):
+    identifier = payload.email.strip()
+    await enforce_auth_limit(db, "verify-otp-ip", _request_ip(request), 20)
+    await enforce_auth_limit(db, "verify-otp-identity", identifier.lower(), 8)
+    target_email = identifier
+
+    if "@" not in identifier:
+        clean_roll = identifier.replace("/", "").replace("-", "").replace(" ", "").lower()
+        student_stmt = (
+            select(User)
+            .join(StudentProfile, StudentProfile.user_id == User.id)
+            .where(
+                (func.lower(StudentProfile.roll_number) == identifier.lower()) |
+                (func.replace(func.replace(func.replace(func.lower(StudentProfile.roll_number), "/", ""), "-", ""), " ", "") == clean_roll)
+            )
+        )
+        found_user = (await db.exec(student_stmt)).first()
+        if found_user:
+            target_email = found_user.email
+
+    otp_stmt = select(PasswordResetOTP).where(
+        func.lower(PasswordResetOTP.email) == target_email.lower()
+    )
+    db_otp = (await db.exec(otp_stmt)).first()
+
+    if not db_otp or not hmac.compare_digest(db_otp.otp_code, _otp_digest(payload.otp)):
+        raise HTTPException(status_code=400, detail="Invalid or incorrect OTP code.")
+
+    if db_otp.expires_at < datetime.utcnow():
+        raise HTTPException(status_code=400, detail="OTP has expired. Please request a new one.")
+
+    return {"status": "success", "message": "OTP verified successfully."}
 
 @router.post("/reset-password", status_code=status.HTTP_200_OK)
 async def reset_password(

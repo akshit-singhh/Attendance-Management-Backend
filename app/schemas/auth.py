@@ -28,6 +28,11 @@ class ResetPasswordRequest(BaseModel):
     new_password: str
 
 
+class VerifyOtpRequest(BaseModel):
+    email: str
+    otp: str
+
+
 class RoleAssignmentRead(BaseModel):
     role: str
     scope_type: str

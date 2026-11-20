@@ -47,6 +47,7 @@ async def get_student_dashboard(
         select(
             Subject.name.label("subject_name"),
             Subject.course_code,
+            Subject.requires_attendance.label("requires_attendance"),
             User.full_name.label("teacher_name"),
             StudentSubjectMap.lab_group.label("lab_group"),
             # Total periods held (Weighting the duration)
@@ -89,7 +90,7 @@ async def get_student_dashboard(
         )
         .where(StudentSubjectMap.student_id == student_id)
         .where(CourseOffering.term_id == target_id)
-        .group_by(Subject.name, Subject.course_code, User.full_name, StudentSubjectMap.lab_group)
+        .group_by(Subject.name, Subject.course_code, Subject.requires_attendance, User.full_name, StudentSubjectMap.lab_group)
     )
     
     results = await db.exec(statement)
@@ -108,25 +109,33 @@ async def get_student_dashboard(
         # Handle SQLAlchemy returning None for sums when no sessions exist yet
         periods_held = int(row.periods_held) if row.periods_held else 0
         periods_attended = int(row.periods_attended) if row.periods_attended else 0
+        requires_att = getattr(row, "requires_attendance", True)
+        if requires_att is None:
+            requires_att = True
         
-        total_held += periods_held
-        total_attended += periods_attended
-        
-        if periods_held > 0:
-            percentage = (periods_attended / periods_held * 100)
-            if percentage >= 85:
-                standing = "Excellent"
-            elif percentage >= WARNING_THRESHOLD:
-                standing = "Good Standing"
+        if requires_att:
+            total_held += periods_held
+            total_attended += periods_attended
+            
+            if periods_held > 0:
+                percentage = (periods_attended / periods_held * 100)
+                if percentage >= 85:
+                    standing = "Excellent"
+                elif percentage >= WARNING_THRESHOLD:
+                    standing = "Good Standing"
+                else:
+                    standing = "Low Attendance"
+                    critical_subjects += 1
+                if percentage >= highest_score:
+                    highest_score = percentage
+                    highest_subject = f"{row.subject_name} ({percentage:.1f}%)"
             else:
-                standing = "Low Attendance"
-                critical_subjects += 1
-            if percentage >= highest_score:
-                highest_score = percentage
-                highest_subject = f"{row.subject_name} ({percentage:.1f}%)"
+                percentage = 0.0
+                standing = "Not Started"
         else:
             percentage = 0.0
-            standing = "Not Started"
+            standing = "No Attendance Required"
+
         subjects_history.append(
             SubjectAttendanceHistory(
                 subject_name=row.subject_name,
@@ -136,7 +145,8 @@ async def get_student_dashboard(
                 periods_attended=periods_attended,
                 percentage=round(percentage, 1),
                 standing=standing,
-                lab_group=row.lab_group
+                lab_group=row.lab_group,
+                requires_attendance=requires_att
             )
         )
 
@@ -496,9 +506,15 @@ async def get_student_subject_history(
             )
         )
 
+    requires_att = getattr(primary_subj, "requires_attendance", True)
+    if requires_att is None:
+        requires_att = True
+
     pct = round((total_attended / total_held * 100.0), 1) if total_held > 0 else 0.0
     standing = "Not Started"
-    if total_held > 0:
+    if not requires_att:
+        standing = "No Attendance Required"
+    elif total_held > 0:
         if pct >= 85:
             standing = "Excellent"
         elif pct >= 75.0:
@@ -515,6 +531,7 @@ async def get_student_subject_history(
         periods_attended=total_attended,
         percentage=pct,
         standing=standing,
+        requires_attendance=requires_att,
         sessions=sessions_list
     )
 

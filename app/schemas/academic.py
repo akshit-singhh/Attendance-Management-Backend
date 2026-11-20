@@ -198,7 +198,11 @@ class SubjectCreate(BaseModel):
 
     course_type: Optional[str] = "LECTURE"
 
+    requires_attendance: bool = True
+
 class SubjectUpdate(BaseModel):
+
+    course_code: Optional[str] = None
 
     name: Optional[str] = None
 
@@ -207,6 +211,8 @@ class SubjectUpdate(BaseModel):
     course_type: Optional[str] = None
 
     is_elective: Optional[bool] = None
+
+    requires_attendance: Optional[bool] = None
 
 class SubjectResponse(BaseModel):
 
@@ -221,6 +227,8 @@ class SubjectResponse(BaseModel):
     credits: int
 
     course_type: Optional[str] = "LECTURE"
+
+    requires_attendance: bool = True
 
 class SemesterCreate(BaseModel):
     name: str

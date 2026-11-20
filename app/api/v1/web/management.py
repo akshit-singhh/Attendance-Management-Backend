@@ -52,6 +52,7 @@ from app.schemas.academic import (
     SectionCreate,
     SectionResponse,
     SubjectCreate,
+    SubjectUpdate,
     TermCreate,
     TermUpdate,
     CourseOfferingCreate,
@@ -1114,10 +1115,47 @@ async def create_subject(
         raise HTTPException(status_code=400, detail="Subject code already exists.")
 
     subject = Subject(
-        course_code=payload.course_code,
-        name=payload.name,
-        is_elective=payload.is_elective
+        course_code=payload.course_code.strip(),
+        name=payload.name.strip(),
+        is_elective=payload.is_elective,
+        credits=payload.credits,
+        course_type=payload.course_type.upper() if payload.course_type else "LECTURE",
+        requires_attendance=payload.requires_attendance
     )
+    db.add(subject)
+    await db.commit()
+    await db.refresh(subject)
+    return subject
+
+@router.put("/subjects/{subject_id}", response_model=Subject, tags=["HOD - Academic Setup"])
+async def update_subject(
+    subject_id: int,
+    payload: SubjectUpdate,
+    admin_id: int = Depends(require_hod),
+    db: AsyncSession = Depends(get_session)
+):
+    subject = await db.get(Subject, subject_id)
+    if not subject:
+        raise HTTPException(status_code=404, detail="Subject not found.")
+
+    if payload.course_code and payload.course_code.strip() != subject.course_code:
+        new_code = payload.course_code.strip()
+        existing = (await db.exec(select(Subject).where(Subject.course_code == new_code))).first()
+        if existing and existing.id != subject_id:
+            raise HTTPException(status_code=400, detail="Subject code already in use by another subject.")
+        subject.course_code = new_code
+
+    if payload.name is not None:
+        subject.name = payload.name.strip()
+    if payload.course_type is not None:
+        subject.course_type = payload.course_type.upper()
+    if payload.is_elective is not None:
+        subject.is_elective = payload.is_elective
+    if payload.credits is not None:
+        subject.credits = payload.credits
+    if payload.requires_attendance is not None:
+        subject.requires_attendance = payload.requires_attendance
+
     db.add(subject)
     await db.commit()
     await db.refresh(subject)

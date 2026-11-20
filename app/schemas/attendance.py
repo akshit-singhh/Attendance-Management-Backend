@@ -53,11 +53,16 @@ class CourseScheduleResponse(BaseModel):
 
 
 class SessionHistoryResponse(BaseModel):
+    session_id: Optional[int] = None
     course_offering_id: int
     subject_name: str
     section_name: str
     date: date
     batch_label: Optional[str] = None
+    total_students: int = 0
+    present_count: int = 0
+    absent_count: int = 0
+    attendance_percentage: float = 0.0
 
 
 class PendingClassResponse(BaseModel):

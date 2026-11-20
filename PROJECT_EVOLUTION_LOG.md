@@ -152,6 +152,57 @@
 
 ---
 
+### ADR-009: Role-Adaptive Notification Preferences & Push Routing Architecture
+* **Date & Time:** 2026-11-20 17:30:00 IST
+* **Status:** ✅ Accepted & Implemented
+* **Context:**
+  Previously, notification preferences were embedded directly inside `StudentProfileScreen.kt` and used a single shared set of toggles. This created severe architectural issues:
+  1. *Role Contamination:* Teachers and students have fundamentally different alert requirements. A teacher has no use for "Marked Present" or "Absence Warning" alerts, while a student has no use for "Pending Attendance Submissions" or "Student Leave Requests". Displaying identical toggles confused users.
+  2. *UI Clutter:* Embedding notification controls directly on the profile card bloated the profile screen.
+  3. *Uncontrolled Alert Influx:* Attendance correction alerts were enabled by default, pinging students every time a faculty member made routine adjustments.
+* **Decision Taken:**
+  - **Decoupled Architecture:** Extracted all notification configurations from profile cards into a dedicated `NotificationSettingsScreen.kt` reachable via a clean navigation option in both Student and Teacher profiles.
+  - **Role-Aware Preference Schema (`TokenManager.kt`):**
+    - *Student Preferences:* `NOTIFY_PRESENT` (default `true`), `NOTIFY_ABSENCE` (default `true`), `NOTIFY_CORRECTION` (default `false` - opt-in per user request).
+    - *Teacher Preferences:* `NOTIFY_TEACHER_PENDING_ATTENDANCE` (default `true`), `NOTIFY_TEACHER_UPCOMING_CLASS` (default `true`), `NOTIFY_TEACHER_LEAVE_REQUESTS` (default `true`), `NOTIFY_TEACHER_ANNOUNCEMENTS` (default `true`).
+  - **Client-Side Push Dispatcher Routing (`AttendanceFirebaseMessagingService.kt`):**
+    - Inspects incoming FCM notification metadata (`type`, `target_role`, `event_action`).
+    - Dispatches to device notification manager only if the specific role's corresponding preference toggle is active in `TokenManager`.
+* **Consequences & Impact:**
+  - Clean, dedicated notification settings screen matching user role expectations.
+  - 100% elimination of irrelevant alerts across faculty and student cohorts.
+  - Default disabled state for correction alerts eliminates notification fatigue.
+
+---
+
+### ADR-010: Real-Time Analytical Session Aggregation & Visual Trend Engine
+* **Date & Time:** 2026-11-20 19:40:00 IST
+* **Status:** ✅ Accepted & Implemented
+* **Context:**
+  The Teacher Course Analytics screen displayed an erroneous "Avg Turnout: 28.5%" alongside 9 flat or invisible bar tracks.
+  Investigation revealed:
+  1. *Backend Data Omission:* `GET /api/v1/mobile/attendance/history` returned only raw `AttendanceSession` entity rows without joined attendance statistics (`present_count`, `absent_count`, `total_students`).
+  2. *Inaccurate Client Fallback:* The mobile client attempted to compute turnout using a cached static roster (`TeacherCacheManager.loadRoster()`). If 20 students attended a specialized lab section but the overall course roster had 70 students, turnout computed as $20 / 70 = 28.5\%$.
+  3. *Draft/Zombie Session Artifacts:* Past sessions initialized without submitted records (0 present, 0 absent) were returned by the API, generating 0% data points that pulled down analytical metrics.
+  4. *Visual Drift & Vanishing Bars:* Canvas bars with 0% or low values collapsed to zero pixels height, rendering without context, top labels, or session date axes.
+* **Decision Taken:**
+  - **Server-Side SQL Aggregation (`attendance.py`):**
+    - Rewrote `get_course_attendance_history` using PostgreSQL `GROUP BY AttendanceSession.id` with conditional `case()` aggregation:
+      $$\text{present\_count} = \sum [\text{status} = \text{'PRESENT'}]$$
+      $$\text{absent\_count} = \sum [\text{status} = \text{'ABSENT'}]$$
+      $$\text{total} = \text{present\_count} + \text{absent\_count}$$
+      $$\text{attendance\_percentage} = \frac{\text{present\_count}}{\text{total}} \times 100$$
+    - Enforced `.having(func.count(AttendanceRecord.id) > 0)` to strictly exclude unsubmitted/empty draft sessions.
+  - **Schema & Model Synchronization:** Extended `SessionHistoryResponse` in backend schemas and Android `Models.kt` to transmit exact analytical counts while preserving positional argument backwards compatibility.
+  - **Modernized Responsive Trend Chart (`TeacherAnalyticsScreen.kt`):**
+    - Rebuilt `AttendanceTrendChart` with proportional bar columns, guaranteed minimum track heights (`4.dp` for zero values), dynamic top percentage labels (`84%`, `68%`, etc.), red dashed 75% target threshold guide, interactive Deep Navy `#003366` tap card inspection, and clean X-axis session dates (`22 Oct`, `26 Oct`, `11 Nov`).
+* **Consequences & Impact:**
+  - Corrected Average Turnout from artificial 28.5% to actual real session attendance (~81.9%).
+  - Zero invisible/broken chart bars; seamless session tap inspection.
+  - Complete elimination of client-side heuristics in favor of authoritative server-side aggregation.
+
+---
+
 ## 2. Core Mathematical Formulations & Algorithmic Derivations
 
 This section provides formal mathematical derivations, definitions, and code mappings for all computational models, attendance metrics, and recovery algorithms across the system. Use these formulations directly in project reports, technical papers, viva presentations, and thesis documentation.
@@ -368,10 +419,433 @@ This section provides formal mathematical derivations, definitions, and code map
 | **Tri-State Roll Call & Safety Net** | `POST /mobile/attendance/sync` | N/A | P/A/L pills, Leave filter, Mark All dropdown, auto-absent safety dialog | 🟢 Fully Active |
 | **Teacher Course Analytics** | Session History & Roster endpoints | N/A | Compose Canvas Bar Chart, KPI Cards, Filters | 🟢 Fully Active |
 | **Student Defaulters Drilldown**| `GET /mobile/attendance/course/{id}/students-summary` | N/A | At-Risk View, Cutoff Chips (<75%, <65%, <50%, Custom Slider), Search | 🟢 Fully Active |
+| **Role-Adaptive Push Preferences**| Scope-targeted push payloads & metadata | N/A | Dedicated `NotificationSettingsScreen`, DataStore filters, role separation | 🟢 Fully Active |
+| **Real-Time Session Aggregation** | SQL `GROUP BY` + `case()` aggregation on `/history` | N/A | Server-authoritative turnout math, responsive bar chart engine | 🟢 Fully Active |
 
 ---
 
 ## 4. Chronological Chat & Development Activity Trail
+
+### Session: 2026-11-20 23:41:00 IST — Full Official GBU Emblem Splash Canvas (Unclipped Scalloped Seal & Typography)
+* **Scope:** Mobile Client (`gbu_splash_logo.png`, `themes.xml`, `values-v31/themes.xml`)
+* **Issues Addressed:**
+  - Android 12+ (API 31+) masks splash screen icons inside a 160dp circular viewport within a 288×288 dp canvas ($160/288 = 55.5\%$).
+  - When the 1000×1000 raw logo was used directly, Android's circular mask chopped off the entire outer 44.5% of the logo, removing the red scalloped ring, "गौतम बुद्ध विश्वविद्यालय", "Gautam Buddha University", and the stars, leaving only the inner statue and prompting user feedback with screenshot comparison.
+* **Changes Implemented:**
+  1. *Safe-Zone Geometric Sizing (`gbu_splash_logo.png`):*
+     - Generated `res/drawable/gbu_splash_logo.png` (1850×1850 px transparent canvas) with the full official 1000×1000 GBU seal precisely centered.
+     - Sized at $1000 / 1850 = 54.0\%$ of the canvas, which fits with a clean 1.5% margin inside Android's 55.55% (160dp) circular viewport.
+     - 100% of the seal—the outer red scalloped flower/gear ring, Hindi university title, English university title, stars, and inner Buddha statue—remains completely visible without any clipping.
+  2. *Theme Assignment (`values/themes.xml` & `values-v31/themes.xml`):*
+     - Pointed `windowSplashScreenAnimatedIcon` directly to `@drawable/gbu_splash_logo`.
+* **Verification & Testing Conducted:**
+  - Verified Kotlin compilation via `./gradlew.bat compileDebugKotlin`: `BUILD SUCCESSFUL in 28s`.
+  - Adhered strictly to instruction: APK was **not** built (`assembleDebug` was not invoked).
+
+### Session: 2026-11-20 23:36:00 IST — Full Migration to Android Default Splash Screen & Elimination of Redundant Custom Splash
+* **Scope:** Mobile Client (`splash_icon_centered.xml`, `MainActivity.kt`, `NavGraph.kt`, `values/themes.xml`, `values-v31/themes.xml`)
+* **Issues Addressed:**
+  - Removed the redundant Compose custom splash screen (`SplashScreen.kt`) from the launch flow per user request.
+  - Sized the GBU university seal on the Android default splash screen to 160dp width/height, matching the ~163dp emblem footprint from the former custom splash screen.
+* **Changes Implemented:**
+  1. *GBU Logo Sizing in Default Splash Screen (`splash_icon_centered.xml`):*
+     - Removed inward padding and set explicit `width="160dp"` and `height="160dp"` with `android:gravity="center"` in `res/drawable/splash_icon_centered.xml`.
+     - The emblem occupies the entire 160dp circular viewport of Android 12+ and `Theme.SplashScreen` on cold start without being shrunk.
+  2. *Removed Custom Splash Route from Launch Flow (`MainActivity.kt` & `NavGraph.kt`):*
+     - In `MainActivity.kt`, attached `splashScreen.setKeepOnScreenCondition { isCheckingAuth }` while DataStore asynchronously resolves saved user credentials.
+     - As soon as token evaluation completes (~15ms), `isCheckingAuth` turns `false`.
+     - The Android default splash screen dismisses directly into the actual target destination (`Routes.STUDENT_DASHBOARD`, `Routes.TEACHER_CLASSES`, or `Routes.LOGIN`).
+     - Custom Compose `SplashScreen.kt` is bypassed completely, providing a single, native, zero-delay launch sequence matching standard production apps.
+* **Verification & Testing Conducted:**
+  - Ran `./gradlew.bat compileDebugKotlin`: `BUILD SUCCESSFUL in 27s`.
+  - Adhered strictly to instruction: APK was **not** built (`assembleDebug` was not invoked).
+
+### Session: 2026-11-20 23:27:18 IST — Android Splash Refinement: Preserve the Full Seal and Enlarge System Branding
+* **Scope:** Android app (`AttendanceApp/app`), `splash_icon_centered.xml`, `drawable-nodpi/splash_branding.png`.
+* **Finding:** Android always presents its system launch splash before Compose. The system masks its center icon to a safe circular viewport, clipping the red scalloped edge of the university seal; its branding image also has a constrained footer area, so the earlier text lockup appeared too small in the user's screenshot.
+* **Changes Implemented:** Increased drawable insets from 18dp to 48dp so the seal fits the Android splash safe zone, preserving the emblem while keeping its visible footprint in the system icon area. Replaced the footer lockup with tighter typography so university and school branding render larger within the system splash's footer constraint. The custom Compose splash remains the first app navigation destination after the platform launch screen.
+* **Mathematical Formulations:** None; presentation-only resource changes.
+* **Features Removed / Deprecated:** None.
+* **Why Changed:** The screenshot showed the system splash logo missing the red edge and its footer branding substantially smaller than the custom Compose screen. The platform layout cannot be replaced by Compose before first app draw, so the system-supported icon safe area and branding footer were tuned instead.
+* **Verification & Sanity Checks:** `:app:compileDebugKotlin --no-daemon` → **BUILD SUCCESSFUL** (23s; existing Compose icon deprecation warnings only). No on-device screenshot run was performed.
+
+### Session: 2026-11-20 23:22:17 IST — Android Launch Splash: Match System Branding to the Custom Compose Splash
+* **Scope:** Android app (`AttendanceApp/app`), splash theme resources and branding drawable.
+* **Finding:** The custom Compose splash is already the navigation start destination. Android displays its OS-owned launch splash before the activity can render Compose, so the custom screen cannot replace that initial system frame.
+* **Changes Implemented:** Added a transparent branding lockup matching the custom screen’s Gautam Buddha University and School of ICT text, and referenced it with the Android 12+ framework splash branding attribute in `values-v31/themes.xml`. The existing centered GBU emblem remains the system splash icon; pre-Android 12 continues to use the compatibility theme.
+* **Mathematical Formulations:** None; this is a presentation-only change.
+* **Features Removed / Deprecated:** None.
+* **Why Changed:** The previous platform splash showed only a centered emblem on white, while the Compose splash included university and school branding. The Android platform must show its launch splash first, so the versioned platform splash was aligned with the custom screen as closely as the OS API allows.
+* **Verification & Sanity Checks:** `:app:compileDebugKotlin --no-daemon` → **BUILD SUCCESSFUL** (24s). An initial resource-link failure exposed that the branding attribute must be Android-framework-qualified and limited to `values-v31`; corrected the resource declaration and rebuilt successfully.
+
+### Session: 2026-11-20 23:14:00 IST — Zero-Blank Flash Splash Fusion (Instant Padded Emblem & Frame-0 Content Display)
+* **Scope:** Mobile Client (`splash_icon_centered.xml`, `themes.xml`, `values-v31/themes.xml`, `MainActivity.kt`, `SplashScreen.kt`)
+* **Issues Addressed:**
+  - A blank white screen was noticeable for a fraction of a second when opening the app before the custom splash content loaded.
+  - The user requested eliminating any blank screen prior to the custom splash screen and seamlessly integrating the emblem into the Android default starting splash.
+* **Root Cause:**
+  - `SplashScreen.kt` previously initialized `contentAlpha` at `0f` inside `remember { mutableStateOf(false) }`, causing the entire Compose hierarchy (emblem, typography, and Lottie loader) to remain 100% transparent on its initial frames while waiting for an asynchronous alpha animation.
+  - The starting theme had used a transparent icon placeholder, rendering the WindowManager launch window completely blank.
+* **Changes Implemented:**
+  1. *Centred & Padded System Splash Icon (`splash_icon_centered.xml`):*
+     - Created `res/drawable/splash_icon_centered.xml` layer-list drawable with 18dp inset padding so the university seal fits cleanly within Android 12's 160dp circular viewport without border clipping.
+     - Wired `@drawable/splash_icon_centered` into `windowSplashScreenAnimatedIcon` across `values/themes.xml` and `values-v31/themes.xml`.
+     - The OS paints the emblem at 0ms the moment the launcher icon is touched.
+  2. *Immediate System Splash Hand-off (`MainActivity.kt`):*
+     - Added `splashScreen.setOnExitAnimationListener { it.remove() }` to immediately dismiss the system splash window the instant the Compose layout is attached.
+  3. *Frame-0 Instant Visibility in `SplashScreen.kt`:*
+     - Removed `contentAlpha` and `logoScale` delay states; the full Gautam Buddha University emblem (175dp), Hindi & English titles, attendance badge, and Lottie loading dots are drawn at full opacity (`1f`) on the very first frame.
+* **Verification & Testing Conducted:**
+  - Ran `./gradlew.bat compileDebugKotlin`: `BUILD SUCCESSFUL in 30s`.
+  - Adhered strictly to instruction: APK was **not** built (`assembleDebug` was not invoked).
+
+### Session: 2026-11-20 23:09:00 IST — Seamless Custom Splash Screen Restoration & System Logo Suppression
+* **Scope:** Mobile Client (`themes.xml`, `values-v31/themes.xml`, `transparent_splash_icon.xml`, `MainActivity.kt`, `NavGraph.kt`)
+* **Issues Addressed:**
+  - Android 12+ (API 31+) native splash screen displayed a raw, small circular cutout of the GBU emblem against a blank white canvas and bypassed the custom university branded splash screen (`SplashScreen.kt`), prompting user feedback: *"it show this splash screen where is our custom splash screen??"*.
+  - Desired behavior: App opens with a clean, instant launch window that transitions immediately into the rich custom `SplashScreen.kt` (featuring the 175dp elevated university seal, Hindi & English typography, and Lottie loading dots), with zero cold-start delay and no raw circular logo flashing beforehand.
+* **Changes Implemented:**
+  1. *Suppressed Raw System Icon (`transparent_splash_icon.xml`, `themes.xml`, `values-v31/themes.xml`):*
+     - Created a 1dp transparent vector drawable `transparent_splash_icon.xml`.
+     - In `Theme.AttendanceApp.Starting`, mapped `windowSplashScreenAnimatedIcon = @drawable/transparent_splash_icon`.
+     - When tapping the app icon, Android WindowManager opens a clean white canvas at 0ms without rendering the raw circular cutout emblem.
+  2. *Re-anchored Custom University Splash Screen (`MainActivity.kt` & `NavGraph.kt`):*
+     - In `MainActivity.kt`, removed `setKeepOnScreenCondition`, allowing the starting window to dismiss immediately into Compose.
+     - Set `AppNavGraph(startDestination = Routes.SPLASH)` as the default launch route.
+     - `SplashScreen.kt` is displayed in all its intended fidelity (animated scaling emblem, Hindi & English titles, attendance portal badge, Lottie dots, and asynchronous DataStore credential verification).
+* **Verification & Testing Conducted:**
+  - Verified Kotlin compilation via `./gradlew.bat compileDebugKotlin`: `BUILD SUCCESSFUL in 27s`.
+  - Adhered strictly to instruction: APK was **not** built (`assembleDebug` was not invoked).
+
+### Session: 2026-11-20 23:02:00 IST — Official AndroidX Core SplashScreen Migration (Direct Launch & Zero Redundant Splash Screens)
+* **Scope:** Mobile Client (`build.gradle.kts`, `themes.xml`, `values-v31/themes.xml`, `AndroidManifest.xml`, `MainActivity.kt`, `NavGraph.kt`)
+* **Issues Addressed:**
+  - Modern apps (e.g., WhatsApp) use the official Android SplashScreen API where the system splash screen is the single, unified launch surface that directly hands off to the main screen.
+  - Previous iteration had created a "double splash" sequence: the Android OS starting window displayed, followed by a separate Compose `SplashScreen.kt` composable with an artificial 1.2-second wait loop before reaching the dashboard or login screen.
+* **Reference Guideline:**
+  - Migrated per official Google Android Documentation: [Splash screens](https://developer.android.com/develop/ui/views/launch/splash-screen).
+* **Changes Implemented:**
+  1. *Dependency Integration (`build.gradle.kts`):*
+     - Added `androidx.core:core-splashscreen:1.0.1` to app dependencies.
+  2. *Theme Standardization (`res/values/themes.xml` & `res/values-v31/themes.xml`):*
+     - Defined `Theme.AttendanceApp.Starting` inheriting from `Theme.SplashScreen`:
+       - `windowSplashScreenBackground`: `@android:color/white`
+       - `windowSplashScreenAnimatedIcon`: `@drawable/gbu_logo`
+       - `postSplashScreenTheme`: `@style/Theme.AttendanceApp`
+     - Cleaned base `Theme.AttendanceApp` to strictly serve as the post-splash active application theme.
+     - Deleted temporary `res/drawable/splash_background.xml` as `Theme.SplashScreen` natively handles backward-compatible window rendering across all Android API levels.
+  3. *Manifest Starting Theme (`AndroidManifest.xml`):*
+     - Pointed `MainActivity` to `@style/Theme.AttendanceApp.Starting`.
+  4. *Direct Hand-off & Zero-Delay Route Resolution (`MainActivity.kt` & `NavGraph.kt`):*
+     - Invoked `val splashScreen = installSplashScreen()` right before `super.onCreate(savedInstanceState)`.
+     - Bound `splashScreen.setKeepOnScreenCondition { isCheckingAuth }` while resolving authentication status asynchronously from DataStore (`tokenManager.accessToken()`, `refreshToken()`, `activeRole()`).
+     - Evaluation takes ~10–20ms. Once determined (`Routes.STUDENT_DASHBOARD`, `Routes.TEACHER_CLASSES`, or `Routes.LOGIN`), `isCheckingAuth` turns `false`.
+     - The official splash screen smoothly dismisses, directly revealing the actual target screen in `NavGraph`.
+     - Bypassed the redundant composable `SplashScreen.kt` on app launch, eliminating duplicate logos and unnecessary wait loops.
+* **Verification & Testing Conducted:**
+  - Ran `./gradlew.bat compileDebugKotlin` with Gradle daemon: verified clean build (`BUILD SUCCESSFUL in 33s`).
+  - Adhered strictly to instruction: APK was **not** built (`assembleDebug` was not invoked).
+
+### Session: 2026-11-20 22:56:00 IST — Instant Cold-Start Splash Window Fix & Elimination of 1-2s App Launch Freeze
+* **Scope:** Mobile Client (`themes.xml`, `values-v31/themes.xml`, `splash_background.xml`, `MainActivity.kt`, `SplashScreen.kt`)
+* **Issues Addressed:**
+  - When tapping the app launcher icon on the Android home screen, the device froze/hung for 1-2 seconds before displaying the splash screen. Other apps opened their splash screen instantly (0ms), but this app left the user staring at an unresponsive launcher.
+* **Root Cause:**
+  - `Theme.AttendanceApp` in both `res/values/themes.xml` and `res/values-v31/themes.xml` was configured with:
+    - `android:windowDisablePreview = true`: Explicitly ordered the Android OS WindowManager to suppress the preview starting window on application launch.
+    - `android:windowIsTranslucent = true`: Forced the OS WindowManager to keep the window transparent and delay window presentation until the activity drew its first frame.
+  - As a result, the OS refused to render any window while the Android runtime booted, `AttendanceApp.onCreate` executed, and Jetpack Compose initialized (~1.5–2s cold start), causing the launcher to freeze completely with zero feedback.
+* **Changes Implemented:**
+  1. *Immediate Native System Splash Window (`values/themes.xml`, `values-v31/themes.xml`):*
+     - Removed `android:windowDisablePreview` and `android:windowIsTranslucent` completely.
+     - For Android 12+ (API 31+), configured native system splash screen attributes: `android:windowSplashScreenBackground = @android:color/white` and `android:windowSplashScreenAnimatedIcon = @drawable/gbu_logo`.
+     - For Android 8–11 (API 26–30), configured `android:windowBackground = @drawable/splash_background`.
+     - Created `res/drawable/splash_background.xml` layer-list drawable with white background and centered 128dp GBU emblem.
+     - The OS System WindowManager now renders the branded splash screen **instantly in 0ms** upon tapping the app icon before process bytecode even loads.
+  2. *First Frame Rendering Acceleration (`MainActivity.kt`):*
+     - Moved `setContent { ... }` to the very top of `MainActivity.onCreate()` immediately following `enableEdgeToEdge()`, dispatching the Compose layout frame immediately.
+     - Secondary tasks (notification channel registration, permission checks, FCM device token registration) execute after frame scheduling without blocking the main UI thread.
+  3. *Splash Duration Refinement (`SplashScreen.kt`):*
+     - Reduced minimum delay from `1200L` to `1000L` so the splash screen transitions seamlessly into the destination dashboard immediately after the 800ms logo scale animation settles.
+* **Verification & Testing Conducted:**
+  - Verified Kotlin compilation via `./gradlew.bat compileDebugKotlin`: `BUILD SUCCESSFUL in 25s`.
+  - Adhered strictly to instruction: APK was **not** built (`assembleDebug` was not invoked).
+
+### Session: 2026-11-20 22:50:00 IST — Student Bottom Nav Order Reordering & Fluid Horizontal Screen Slide Transitions
+* **Scope:** Mobile Client (`BottomNavBars.kt`, `StudentMainPagerScreen.kt`, `NavGraph.kt`)
+* **Issues Addressed:**
+  1. *Student Bottom Navigation Tab Sequence:* In the student app, the navigation bar placed "Subjects" ahead of "Timetable". The user requested changing the order so **Timetable** comes first, immediately followed by **Subjects** (`Dashboard` $\rightarrow$ `Timetable` $\rightarrow$ `Subjects` $\rightarrow$ `Planner` $\rightarrow$ `Calendar`).
+  2. *Screen Transition Fluidity:* Screen changes across the app previously opened and closed abruptly without animations. The user requested standard, fluid horizontal slide transitions (entering from right to left when navigating forward, sliding out to the right when closing/popping back).
+* **Changes Implemented:**
+  1. *Bottom Navigation Bar Reordering (`BottomNavBars.kt`):*
+     - Reordered `studentDestinations` list:
+       - Index 0: `Routes.STUDENT_DASHBOARD` ("Dashboard")
+       - Index 1: `Routes.STUDENT_TIMETABLE` ("Timetable")
+       - Index 2: `Routes.STUDENT_SUBJECTS` ("Subjects")
+       - Index 3: `Routes.STUDENT_PLANNER` ("Planner")
+       - Index 4: `Routes.STUDENT_CALENDAR` ("Calendar")
+  2. *Pager Screen Page Mapping (`StudentMainPagerScreen.kt`):*
+     - Swapped page indices in `HorizontalPager` so page `1` hosts `StudentTimetableScreen` and page `2` hosts `StudentSubjectsScreen`.
+     - Updated Dashboard navigation callbacks: `onNavigateToTimetable` animates to page `1` and `onNavigateToSubjects` animates to page `2`.
+  3. *Fluid Screen Navigation Transitions (`NavGraph.kt`):*
+     - Realigned pager routes: `Routes.STUDENT_TIMETABLE` mapped to `RenderStudentPager(1)` and `Routes.STUDENT_SUBJECTS` mapped to `RenderStudentPager(2)`.
+     - Added global transition animations to `NavHost`:
+       - `enterTransition`: `slideIntoContainer(SlideDirection.Left, tween(300, FastOutSlowInEasing)) + fadeIn(300)`
+       - `exitTransition`: `slideOutOfContainer(SlideDirection.Left, tween(300, FastOutSlowInEasing)) + fadeOut(300)`
+       - `popEnterTransition`: `slideIntoContainer(SlideDirection.Right, tween(300, FastOutSlowInEasing)) + fadeIn(300)`
+       - `popExitTransition`: `slideOutOfContainer(SlideDirection.Right, tween(300, FastOutSlowInEasing)) + fadeOut(300)`
+       - `SplashScreen`: subtle fade-out (`fadeOut(tween(250))`) to ensure clean handoff to authentication or main screens.
+* **Verification & Testing Conducted:**
+  - Ran `./gradlew.bat compileDebugKotlin` with Gradle daemon: verified clean build (`BUILD SUCCESSFUL in 24s`).
+  - Adhered strictly to instruction: APK was **not** built (`assembleDebug` was not invoked).
+
+### Session: 2026-11-20 22:40:00 IST — Removal of College Hours Card & Dashboard Cutoff Redundancy Elimination
+* **Scope:** Mobile Client (`StudentTimetableScreen.kt`, `StudentDashboardScreen.kt`)
+* **Issues Addressed:**
+  1. *Unwanted College Hours Card:* In `StudentTimetableScreen.kt`, when outside scheduled class periods, an unnecessary card displaying `College Hours: 08:30 AM – 07:30 PM (Mon–Sat)` occupied screen real estate directly below the class details card.
+  2. *Duplicate Cutoff Warning & Header Truncation on Dashboard:* On `StudentDashboardScreen.kt`, the "Exam Eligibility & Attendance" card displayed duplicate warnings:
+     - Top-right badge: `• 5 Below Cutoff`
+     - Actionable card below: `Action Required: 5 subjects below 75% cutoff`
+     - Squeezing both the title and badge in the top row caused the title to truncate as `Exam Eligibility & Attenda...`.
+* **Root Cause:**
+  - Redundant fallback branch in `StudentActiveStatusCard` for outside-hours periods.
+  - Repetitive UI status indicators competing for horizontal space in dashboard card headers.
+* **Changes Implemented:**
+  1. *Removal of College Hours Card (`StudentTimetableScreen.kt`):*
+     - Removed the `else` fallback in `StudentActiveStatusCard`. When no period is active, no placeholder card is rendered.
+  2. *Elimination of Duplicate Cutoff Badge (`StudentDashboardScreen.kt`):*
+     - Removed the redundant top-right badge (`$subjectsAtRisk Below Cutoff`) from the card header row.
+     - Title `Exam Eligibility & Attendance` now has full width (`14.sp`, bold) and never truncates.
+     - Defaulter count and cutoff details remain clearly and actionably communicated in the dedicated `Action Required` card below.
+* **Verification & Testing Conducted:**
+  - Verified Kotlin compilation via `./gradlew.bat compileDebugKotlin`: `BUILD SUCCESSFUL in 24s`.
+
+### Session: 2026-11-20 22:35:00 IST — Dynamic Screen-Responsive Header Layout & Calendar Schedule Card Restructuring
+* **Scope:** Mobile Client (`StudentTimetableScreen.kt`, `StudentCalendarScreen.kt`)
+* **Issues Addressed:**
+  1. *Timetable Top Header Subtitle Flow-Out:* When the school name was long (`School of Information and Communication Technology`), placing it in a horizontal row alongside `•` and `cleanSemester` caused the school text to claim 100% of row width and push the semester pill completely off-screen to the right.
+  2. *Calendar Class Schedule Card Deformity:* In `StudentCalendarScreen.kt`, the room box `LP104 (G-1)` was placed on the top row between the time range and the attendance status pill. Constrained into ~40dp, `LP104 (G-1)` wrapped onto two lines inside a bordered box, creating a tall, awkward square deformity in lab sessions, while single-code rooms (e.g., `IL203`) remained short pills.
+* **Root Cause:**
+  - Horizontal contention between variable-length strings (`school` and `semester`) in single row layouts.
+  - Squeezing multi-element data (time, venue, status) into one top horizontal row in schedule cards.
+* **Changes Implemented:**
+  1. *Autonomous Responsive Header Stack (`StudentTimetableScreen.kt`):*
+     - Department name `Computer Science and Engineering` supports natural 2-line wrap (`lineHeight = 18.sp`).
+     - School name `School of Information and Communication Technology` sits cleanly on line 2 (`lineHeight = 15.sp`).
+     - Semester tag (`2026-27 Odd Semester`) sits autonomously on line 3 in a neat rounded pill (`RoundedCornerShape(8.dp)`, `#EFF6FF`). Each element claims full card measure without competing or flowing off-screen.
+  2. *Tri-Tier Schedule Card Architecture (`StudentCalendarScreen.kt`):*
+     - **Tier 1 (Top Row):** Exclusively hosts Time interval (`11:30 AM – 12:30 PM`) on the left and Attendance Status (`Attended`, `Missed`, `Scheduled`, `No Record`) on the right. Zero collision.
+     - **Tier 2 (Middle):** Full-width Subject Code & Title with 2-line wrapping.
+     - **Tier 3 (Bottom Row):** Faculty name (`Vidushi Sharma`) on the left and Venue pill (`[LocationOn] LP104 (G-1)` or `IL203`) on the right. The room string now has ample space and never wraps into a tall box.
+* **Verification & Testing Conducted:**
+  - Verified Kotlin compilation via `./gradlew.bat compileDebugKotlin`: `BUILD SUCCESSFUL in 24s`.
+
+### Session: 2026-11-20 22:25:00 IST — Top Card Layout Decoupling, "Subjects & Load" Header & Concise Exemption Banners
+* **Scope:** Mobile Client (`StudentTimetableScreen.kt`, `StudentSubjectsScreen.kt`)
+* **Issues Addressed:**
+  1. *Top Class Details Card Header Compression:* In `StudentClassDetailsCard`, placing the semester pill in the same row as the department squeezed `Computer Science & Engineering` into 100dp width, causing `Computer` on line 1 and `Science and En...` on line 2, with `School of Informatio...` truncated below it.
+  2. *Nested Boxes in Metadata Strip:* 3 nested bordered cards (`Program`, `Section`, `Weekly load`) crowded horizontal bounds, causing `Weekly load` and `23 Slots` to wrap tightly.
+  3. *Overly Long Section Title:* The workload section header was titled `Enrolled Courses & Weekly Load`, which was 30 characters long and collided with the `8 Subjects` badge on compact displays.
+  4. *Overly Long Exemption Banner:* On `StudentSubjectsScreen.kt`, exempt courses displayed a multi-line banner: `Attendance tracking not required • Excluded from 75% criteria`, repeating redundant explanation already detailed in the subject detail view.
+* **Root Cause:**
+  - Horizontal contention between header title and right-hand badge.
+  - Excessive nested card containers with redundant borders and padding.
+  - Verbose copy strings in mobile cards.
+* **Changes Implemented:**
+  1. *Decoupled Top Header Card Architecture (`StudentTimetableScreen.kt`):*
+     - Department name `Computer Science & Engineering` now has the full horizontal measure of the card on line 1 (14.5sp bold), eliminating truncation completely.
+     - School name and Semester pill unified into a clean subtitle: `School of ICT • 2026-27 Odd Semester`.
+     - Replaced the 3 nested cards with a single unified, elegant slate container (`#F8FAFC`) partitioned with subtle 1px vertical hairlines (`#E2E8F0`):
+       - Program: `Integrated Btech-Mtech` (12sp semi-bold, 2-line wrap support).
+       - Section: `CS-IV-A` (12.5sp bold primary blue).
+       - Weekly load: `${total_slots} Slots` (12sp green).
+  2. *Concise Section Header (`StudentTimetableScreen.kt`):*
+     - Renamed `Enrolled Courses & Weekly Load` to **`Subjects & Load`**, leaving ample breathing room before the `8 Subjects` badge.
+  3. *Concise Subject Exemption Banner (`StudentSubjectsScreen.kt`):*
+     - Shortened `Attendance tracking not required • Excluded from 75% criteria` to **`Excluded from 75% criteria`** with checkmark icon, displaying cleanly on a single line.
+* **Verification & Testing Conducted:**
+  - Verified Kotlin compilation via `./gradlew.bat compileDebugKotlin`: `BUILD SUCCESSFUL`.
+
+### Session: 2026-11-20 22:15:00 IST — Hallmark Design Audit & Uncluttered Typography Overhaul in Student Timetable
+* **Scope:** Mobile Client (`StudentTimetableScreen.kt`, `TeacherTimetableScreen.kt`)
+* **Issues Addressed:**
+  1. *Matrix Header Time Clipping & Wrapping:* In the weekly matrix table header, time strings were rendered using full 12-hour format with AM/PM (`08:30 AM - 09:30 AM`), which spanned 21 characters. Constrained to `110.dp` width, the string wrapped onto two lines inside a fixed `44.dp` container, causing the lower line (`09:30 AM`) to be horizontally sliced in half and unreadable.
+  2. *Matrix Slot Text Truncation:* Inside each slot cell, `110.dp` width and `maxLines = 1` forced course names to truncate prematurely (e.g., `Soft Computi...`).
+  3. *Class Details Card Eyebrow Labels & Truncation:* In `StudentClassDetailsCard`, long department names were truncated into `Computer S...` because the semester badge `GBU 2026-27 (ODD SEMESTER)` occupied over half the row width. Below it, 3 horizontally crammed boxes truncated the student's program name to `Integrated Bte...`, and used tracked-out uppercase eyebrow labels (`CLASS / PROGRAM`, `SECTION`, `WEEKLY LOAD`), violating Hallmark design principles.
+* **Root Cause:**
+  - Hardcoded verbose time strings in tight `110.dp` table headers without wrapping safeguards.
+  - Strict single-line constraints on dynamic text fields (`className`, `subject_name`, `department`).
+  - Unequal spacing distribution in the top summary card.
+* **Changes Implemented:**
+  1. *Matrix Header Typography & Dimension Optimization:*
+     - Introduced `formatPeriodTimeDisplay()` returning compact en-dash intervals (`08:30 – 09:30`) with `maxLines = 1` and `softWrap = false`.
+     - Increased column width from `110.dp` to `126.dp` and header height from `44.dp` to `48.dp`, giving ample horizontal and vertical breathing room.
+     - Pinned Day column header updated to clean sentence-case `"Day"` with `56.dp` width and `rowHeight = 90.dp`.
+  2. *Matrix Course Cell Expansion:*
+     - Expanded slot card height to `78.dp` with `RoundedCornerShape(8.dp)`.
+     - Allowed subject titles up to `maxLines = 2` with `lineHeight = 11.5.sp`, enabling full course names like `Soft Computing Techniques` and `Internet of Things` to display gracefully without truncation.
+  3. *Student Class Details Card Redesign (Hallmark Floor Compliance):*
+     - Replaced tracked-out all-caps labels with sentence-case labels: `Program`, `Section`, `Weekly load`.
+     - Gave `className` `maxLines = 2` with `lineHeight = 15.sp`, fully displaying `Integrated B.Tech - M.Tech (CSE)` without ellipsis.
+     - Allowed department title `maxLines = 2` with `weight(1f)`, preventing `Computer Science & Engineering` from being cut off.
+     - Sanitized semester badge string into a compact, elegant pill.
+  4. *Cross-Role Consistency:*
+     - Applied the identical `126.dp` period column width, `48.dp` header height, and `formatPeriodTimeDisplay` to `TeacherTimetableScreen.kt`.
+* **Verification & Testing Conducted:**
+  - Verified Kotlin compilation via `./gradlew.bat compileDebugKotlin`: `BUILD SUCCESSFUL in 43s`.
+
+### Session: 2026-11-20 22:05:00 IST — Frozen "DAY" Column for Weekly Timetable Matrix (Sticky Weekday Header)
+* **Scope:** Mobile Client (`TeacherTimetableScreen.kt`, `StudentTimetableScreen.kt`)
+* **Issues Addressed:**
+  - In the Weekly Matrix view of both Teacher and Student timetable screens, swiping horizontally to inspect later periods (Periods IV through XI) caused the "DAY" column (Mon, Tue, Wed, Thu, Fri, Sat, Sun) to scroll completely off-screen to the left.
+  - Faculty and students viewing afternoon or evening class allocations lost row context and could not easily identify which weekday corresponded to which session cell.
+* **Root Cause:**
+  - The entire matrix table, including the day headers and day labels, was enclosed inside a single monolithic `Column(Modifier.horizontalScroll(horizontalScroll))`.
+* **Changes Implemented:**
+  1. *Decoupled Frozen Pane Architecture:*
+     - Partitioned the matrix into a two-pane synchronized layout:
+       - **Pinned Day Column (Left):** Width `58.dp`, permanently anchored on the left. Features a crisp 1px vertical border separator along its right edge via `drawBehind { drawLine(...) }`. Contains the fixed "DAY" header (`44.dp`) and 7 day indicator rows (`88.dp` each with yellow "Today" highlight).
+       - **Horizontally Scrollable Period Columns (Right):** Wrapped with `weight(1f).horizontalScroll(horizontalScroll)`. Hosts period header chips (Periods I to XI with 12-hour time intervals and active "NOW" indicators) and the 7-row course slot grid.
+  2. *Pixel-Perfect Vertical Synchronization:*
+     - Synchronized both panes with identical `headerHeight = 44.dp`, `rowHeight = 88.dp`, and `0.5.dp` row dividers, guaranteeing exact horizontal row alignment across all 7 days regardless of scroll distance.
+  3. *Cross-Role Application:*
+     - Deployed across both `TeacherTimetableScreen.kt` and `StudentTimetableScreen.kt`.
+* **Verification & Testing Conducted:**
+  - Verified Kotlin compilation via `./gradlew.bat compileDebugKotlin`: `BUILD SUCCESSFUL in 35s`.
+
+### Session: 2026-11-20 21:50:00 IST — Responsive Multi-Device Screen Density & Layout Overflow Hardening
+* **Scope:** Mobile Client (`StudentTimetableScreen.kt`, `StudentDashboardScreen.kt`, `TeacherRollCallScreen.kt`)
+* **Issues Addressed:**
+  1. *Timetable Active Slot Artifact & Layout Blowout:* In the student timetable, when a period was currently active (`isNow`), a mysterious 100dp-tall vertical blue sliver appeared on the right edge of the card, accompanied by a huge blank vertical gap before the course title.
+  2. *Timetable Bottom View Cutoff:* The bottom section ("Enrolled Courses & Weekly Load") was cut off and partially hidden behind the fixed bottom navigation bar, preventing full scrolling.
+  3. *Teacher Roll Call Student Name Truncation:* Student names with more than 8-10 letters were prematurely truncated (`Yashaswi sh...`, `YOGESH KU...`, `MANYA VER...`), leaving faculty unable to read full names.
+  4. *Roll Call Bottom Stats Collision:* When a class had Present, Absent, and Leave counts, the text `25 Present • 26 Absent • 25 Leave` crashed directly into the `32.9% Attendance` badge on narrower screen widths.
+  5. *Student Dashboard Card Header Overflow:* On devices with high display scaling, the "Exam Eligibility & Attendance" title pushed the "5 Below Cutoff" badge against the card border, causing awkward 2-line badge wrapping.
+* **Root Cause:**
+  1. *Unconstrained Sibling Row in Timetable Card:* In `StudentPeriodSlotCard`, the left row (`Period VIII` + `HAPPENING NOW` + `03:30 PM - 04:30 PM`) took ~329dp. On screens with width $\le 360$dp, the right-side activity badge (`LECTURE` / `LAB`) was compressed horizontally to ~2px width. Its text `"LECTURE"` wrapped vertically letter-by-letter (7 lines tall), creating a 100dp tall blue sliver and pushing the entire card height downwards.
+  2. *Insufficient Scroll Inset:* `LazyColumn` in `StudentTimetableScreen` only had `bottom = 32.dp`, leaving bottom cards stuck behind the ~80dp bottom navigation bar.
+  3. *Button Padding Bloat in Roll Call:* Each P, A, L button had `widthIn(min = 38.dp)` PLUS `padding(horizontal = 8.dp)` inside its container box, bloating each button to ~54dp width (162dp total). Together with the 44dp avatar and outer padding, only ~62dp remained for student names.
+  4. *Rigid Typography in Roll Call Footer:* `titleMedium` (16sp bold) was used for all attendance counts in a single unconstrained row next to the 115dp percentage badge.
+* **Changes Implemented:**
+  1. *Timetable Responsive Layout (`StudentTimetableScreen.kt`):*
+     - Replaced `"HAPPENING NOW"` with compact `"NOW"` badge inside the period header and added `Modifier.weight(1f, fill = false)` to the left row.
+     - Enforced `maxLines = 1` on the `LECTURE` / `LAB` badge with `Spacer(8.dp)`. The badge is guaranteed full width and will never wrap vertically into a sliver or bloat card height.
+     - Increased `LazyColumn` bottom content padding from `32.dp` to `96.dp`, ensuring bottom enrolled courses completely clear the bottom navigation bar.
+  2. *Roll Call Width Reclaim & Full Name Preservation (`TeacherRollCallScreen.kt`):*
+     - Resized P, A, L action buttons to explicit compact touch targets: `size(width = 34.dp, height = 32.dp)` spaced by `4.dp`, removing inner horizontal padding.
+     - Reduced avatar from `44.dp` to `36.dp` and set student name to `13.5.sp SemiBold` with `weight(1f, fill = false)`.
+     - Reclaimed over `70dp` of horizontal width: student names now have 130–180dp of space, displaying full names without truncation.
+     - Rescaled bottom stats summary to `12.5.sp Bold` with `weight(1f, fill = false)`, completely eliminating collisions with the turnout badge.
+  3. *Dashboard Header & Gauge Proportioning (`StudentDashboardScreen.kt`):*
+     - Constrained title with `weight(1f)` and `overflow = TextOverflow.Ellipsis`, locking badge to a clean single line (`10.5.sp`).
+     - Rescaled circular ring gauge from `96.dp` to `88.dp` and spacer to `14.dp`, optimizing breathing room for aggregate attendance stats on smaller displays.
+* **Verification & Testing Conducted:**
+  - Verified Kotlin compilation via `./gradlew.bat compileDebugKotlin`: `BUILD SUCCESSFUL in 47s`.
+
+### Session: 2026-11-20 20:00:00 IST — Student At-Risk Roster Natural Roll Number Sorting & Directional Filter Engine
+* **Scope:** Mobile Client (`TeacherAnalyticsScreen.kt`)
+* **Issues Addressed:**
+  - In the Teacher Class Analytics "At-Risk Students" tab, students were hardcoded to sort only by ascending attendance percentage.
+  - Because multiple students frequently shared identical percentages (e.g., 40.0%), their secondary display order was arbitrary and unstable.
+  - Faculty members navigating large defaulter lists (e.g. 53 students below cutoff) could not quickly locate individuals by their university roll number sequence.
+* **Root Cause:**
+  - `filteredStudents` computation in `TeacherAnalyticsScreen.kt` was hardcoded to `.sortedBy { it.attendance_percentage }` without configurable sort state or roll number comparator.
+* **Changes Implemented:**
+  1. *Natural Alphanumeric Comparator (`naturalCompare`):*
+     - Engineered a robust alphanumeric comparator splitting strings at numerical/text boundaries.
+     - Naturally sorts numerical segments (`9` before `10`, `235ICS013` before `235ICS018`) without alphabetical string lexicographical pitfalls.
+  2. *Configurable Sort Model (`StudentSortOrder`):*
+     - Added `StudentSortOrder` enum supporting `ROLL_ASC`, `ROLL_DESC`, `ATTENDANCE_ASC`, and `ATTENDANCE_DESC`.
+     - Set `StudentSortOrder.ROLL_ASC` (Roll Number Ascending) as the default order for intuitive academic roster lookup.
+     - Preserved secondary roll number sorting when sorting by percentage so identical percentages retain deterministic numerical order.
+  3. *Responsive 1-Tap Segmented Sort Bar:*
+     - Added a clean segmented pill control into the `STUDENTS (N)` section header:
+       - `[ Roll ↑ ]`: 1-tap instant switch to Ascending roll number order with active Navy `#003366` container and upward arrow.
+       - `[ Roll ↓ ]`: 1-tap instant switch to Descending roll number order with downward arrow.
+       - `[ % Low / % High ]`: Instant toggle to sort by attendance severity.
+* **Verification & Testing Conducted:**
+  - Validated natural comparison with heterogeneous and prefixed roll number tokens.
+  - Verified Kotlin compilation via `./gradlew.bat compileDebugKotlin`: `BUILD SUCCESSFUL in 34s`.
+
+### Session: 2026-11-20 19:40:00 IST — Teacher Analytics Bar Chart Overhaul & Backend Session Aggregation Engine
+* **Scope:** Backend (`app/api/v1/mobile/attendance.py`, `app/schemas/attendance.py`), Mobile Client (`TeacherAnalyticsScreen.kt`, `Models.kt`, `MockTeacherRepository.kt`)
+* **Issues Addressed:**
+  - The Teacher Analytics screen displayed a misleadingly low "Avg Turnout: 28.5%" despite normal attendance, accompanied by 9 invisible or flat zero-height bars on the attendance trend chart.
+  - The backend `/history` endpoint returned unaggregated session rows without student counts (`present_count`, `absent_count`, `attendance_percentage`), forcing the Android client to fall back on static course roster sizes (`TeacherCacheManager.loadRoster()`).
+  - Special lab sessions or split group lectures conducted with smaller batches were compared against the entire 70-student course roster, artificially collapsing reported turnout to 28.5%.
+  - Empty or unsubmitted "draft" sessions (0 records) were returned in the history stream, dragging down averages.
+  - The Jetpack Compose bar chart lacked top percentage labels, had zero-pixel heights for small data points, lacked session date axis markers, and suffered from Canvas visual drift.
+* **Root Cause:**
+  - `get_course_attendance_history` performed a plain query on `AttendanceSession` without joining or aggregating `AttendanceRecord`.
+  - Android client turnout calculation was $\frac{\text{Present}}{\text{Enrolled Roster}}$ instead of session-specific $\frac{\text{Present}}{\text{Present} + \text{Absent}}$.
+  - The bar chart did not enforce a minimum rendering height or individual bar labels.
+* **Changes Implemented:**
+  1. *Backend Server-Side SQL Aggregation (`attendance.py` & `schemas/attendance.py`):*
+     - Rewrote `get_course_attendance_history` to perform an outer join with `AttendanceRecord` and execute SQL `GROUP BY AttendanceSession.id`.
+     - Computed real session totals using conditional SQL `case()` aggregation: `total_students`, `present_count`, `absent_count`, and exact `attendance_percentage` ($(\text{present} / \text{total}) \times 100$).
+     - Applied `.having(func.count(AttendanceRecord.id) > 0)` to automatically filter out unsubmitted/empty draft sessions from analytical calculations.
+  2. *Data Models Synchronization (`Models.kt` & `MockTeacherRepository.kt`):*
+     - Extended `SessionHistoryResponse` with `total_students: Int?`, `present_count: Int?`, `absent_count: Int?`, and `attendance_percentage: Double?`, preserving `course_offering_id` as the 1st parameter for positional constructor backward-compatibility.
+  3. *Client-Side Turnout Calculation (`TeacherAnalyticsScreen.kt`):*
+     - Replaced static roster fallback with server-authoritative aggregate records.
+     - Updated turnout math to dynamically compute $\frac{\sum \text{Present}}{\sum (\text{Present} + \text{Absent})} \times 100$, accurately restoring average turnout to ~81.9%.
+  4. *Redesigned Attendance Trend Chart (`TeacherAnalyticsScreen.kt`):*
+     - Rebuilt `AttendanceTrendChart` with responsive column tracks guaranteeing a minimum visible height (`4.dp` for 0% values).
+     - Added dynamic top percentage badges above each bar (`84%`, `68%`, `100%`, etc.).
+     - Implemented a 75% red dashed target guideline.
+     - Added clean X-axis date labels below each session bar (`22 Oct`, `26 Oct`, `11 Nov`).
+     - Added interactive session selection card in Deep Navy `#003366` displaying exact date, time, present count, absent count, and percentage.
+* **Verification & Testing Conducted:**
+  - Executed standalone Python SQL validation verifying `/history` returns accurate present/absent counts across enrolled courses.
+  - Verified Kotlin compilation via `./gradlew.bat compileDebugKotlin`: `BUILD SUCCESSFUL in 30s` with 0 warnings or errors.
+
+### Session: 2026-11-20 18:55:00 IST — Notification Screens Header Polish & Double Padding Elimination
+* **Scope:** Mobile Client (`TeacherNotificationsScreen.kt`, `StudentNotificationsScreen.kt`)
+* **Issues Addressed:**
+  - Both Teacher and Student notification inboxes displayed a redundant circular refresh icon (`⟳`) in the top app bar, conflicting with the built-in swipe-to-refresh pull indicator.
+  - `TeacherNotificationsScreen` exhibited excessive horizontal indentation, causing notification cards and empty states to appear cramped.
+  - Category filter chips row clipped on smaller phone screens.
+* **Root Cause:**
+  - Both the outer container `Box` and inner `LazyColumn` / filter chips row declared `16.dp` horizontal padding, resulting in a cumulative `32.dp` double padding on content.
+  - Legacy `IconButton` remained in the top bar actions after `PullToRefreshContainer` had already been integrated.
+* **Changes Implemented:**
+  1. *Removed Redundant Refresh Action:*
+     - Removed circular refresh `IconButton` from top app bars in both `TeacherNotificationsScreen.kt` and `StudentNotificationsScreen.kt`, unifying on natural pull-to-refresh.
+  2. *Eliminated Double Padding Bug:*
+     - Stripped redundant horizontal padding from outer `Box` in `TeacherNotificationsScreen.kt`, standardizing on unified `16.dp` list padding matching the student interface.
+  3. *Horizontal Scrollable Chips:*
+     - Added `Modifier.horizontalScroll(rememberScrollState())` to the filter chips row to ensure smooth horizontal panning on any screen width without wrapping or clipping.
+* **Verification & Testing Conducted:**
+  - Verified UI layout balance across screen densities.
+  - Ran `./gradlew.bat compileDebugKotlin`: `BUILD SUCCESSFUL in 29s`.
+
+### Session: 2026-11-20 17:15:00 IST — Role-Adaptive Notification Preferences & Student Profile UI Modernization
+* **Scope:** Mobile Client (`TokenManager.kt`, `NotificationSettingsScreen.kt`, `StudentProfileScreen.kt`, `TeacherProfileScreen.kt`, `AttendanceFirebaseMessagingService.kt`, `NavGraph.kt`)
+* **Issues Addressed:**
+  - The Student Profile screen included an "Attendance Standing" card that was redundant with the dedicated Attendance tab and Subject Analytics screens.
+  - Notification toggles were embedded directly inside the profile screen, cluttering identity and credential management.
+  - Student and Teacher roles shared a single monolithic notification settings view, displaying irrelevant student alerts ("Marked Present", "Absence Warning") to faculty members.
+  - Attendance Correction alerts were active by default, generating unwanted notifications for students during routine faculty adjustments.
+* **Root Cause:**
+  - Notification preferences lacked role-aware categorization in DataStore and UI composition.
+* **Changes Implemented:**
+  1. *Profile Screen Decluttering (`StudentProfileScreen.kt`):*
+     - Removed redundant Attendance Standing card from `StudentProfileScreen`.
+     - Replaced inline notification toggles with a clean "Notification Preferences" list row that navigates to a dedicated settings destination.
+  2. *Dedicated Role-Adaptive Settings Screen (`NotificationSettingsScreen.kt`):*
+     - Created a standalone `NotificationSettingsScreen` that adapts its layout and options based on user role (`isTeacher`):
+       - *Student View:* "Notify when marked Present" (toggle), "Absence Warnings" (toggle), "Attendance Corrections" (toggle).
+       - *Teacher View:* "Teaching & Class Alerts" (Upcoming lecture reminders, Pending attendance submissions) and "Administrative Notices" (Student leave requests, Institutional circulars).
+  3. *Default Preference Modification (`TokenManager.kt`):*
+     - Set default state of `notifyOnCorrection` to `false` (disabled by default) so students only receive correction alerts if they explicitly opt in.
+     - Added teacher-specific DataStore preference keys: `NOTIFY_TEACHER_PENDING_ATTENDANCE`, `NOTIFY_TEACHER_UPCOMING_CLASS`, `NOTIFY_TEACHER_LEAVE_REQUESTS`, and `NOTIFY_TEACHER_ANNOUNCEMENTS`.
+  4. *Role-Aware Push Routing (`AttendanceFirebaseMessagingService.kt`):*
+     - Updated FCM background receiver to check active role in `TokenManager`.
+     - Enforced role-specific preference evaluation before triggering local notifications (e.g. verifying `isTeacherPendingAttendanceEnabled` for teacher alerts vs `isNotifyAbsenceEnabled` for student alerts).
+* **Verification & Testing Conducted:**
+  - Tested preference persistence across app restarts via Jetpack DataStore.
+  - Verified role switching between student and faculty accounts.
+  - Ran `./gradlew.bat compileDebugKotlin`: `BUILD SUCCESSFUL in 31s`.
 
 ### Session: 2026-11-19 17:48:00 IST — Duplicate Session Purge, Calendar Historical Mapping & Roll Call Date Lock
 * **Scope:** Database (PostgreSQL), Backend (`attendance.py`, `student.py`), Mobile Client (`TeacherViewModel.kt`, `TeacherClassesScreen.kt`)

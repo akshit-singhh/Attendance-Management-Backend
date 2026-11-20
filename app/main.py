@@ -82,6 +82,7 @@ app.mount("/static/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 # Health Endpoint
 app.include_router(health.router, prefix="/health", tags=["Health"])
+app.include_router(health.router, prefix=f"{settings.API_V1_STR}/health", tags=["Health"])
 
 # Notification & Communications Router
 app.include_router(

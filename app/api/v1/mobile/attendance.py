@@ -424,6 +424,8 @@ async def sync_offline_attendance(
     enrolled_students = set((await db.exec(enrolled_stmt)).all())
 
     # 5. Create or Update AttendanceSession
+    old_status_map = {}
+    is_edit_session = existing_session is not None
     if existing_session:
         target_session = existing_session
         target_session.duration_periods = payload.duration_periods
@@ -441,6 +443,8 @@ async def sync_offline_attendance(
         old_records_stmt = select(AttendanceRecord).where(AttendanceRecord.session_id == target_session.id)
         old_records = (await db.exec(old_records_stmt)).all()
         for old_rec in old_records:
+            st = old_rec.status.value.upper() if hasattr(old_rec.status, "value") else str(old_rec.status).upper()
+            old_status_map[old_rec.student_id] = st
             await db.delete(old_rec)
         await db.commit()
 
@@ -558,7 +562,7 @@ async def sync_offline_attendance(
         except Exception as e:
             logger.warning(f"Error in weekly lab auto-fulfillment: {e}")
 
-    # Dispatch student push notifications in background for ABSENT / LEAVE
+    # Dispatch student push notifications in background
     try:
         subject = await db.get(Subject, offering.subject_id)
         subject_name = subject.name if subject else "Class"
@@ -567,22 +571,79 @@ async def sync_offline_attendance(
 
         for item in payload.records:
             st = item.status.value.upper() if hasattr(item.status, "value") else str(item.status).upper()
-            if "ABSENT" in st or st in ("ABSENT", "A") or "LEAVE" in st or st in ("LEAVE", "L"):
-                is_absent = "ABSENT" in st or st in ("ABSENT", "A")
-                status_label = "Absent" if is_absent else "on Leave"
-                title = f"Attendance: {status_label} ({subject_code})" if subject_code else f"Attendance: {status_label}"
-                message = f"You were marked {status_label} for {subject_name} on {date_str}."
-                await notify_users(
-                    db=db,
-                    background_tasks=background_tasks,
-                    sender_id=teacher_id,
-                    user_ids=[item.student_id],
-                    title=title,
-                    message=message,
-                    notification_type="ATTENDANCE_ALERT",
-                    priority="HIGH" if is_absent else "NORMAL",
-                    section_id=offering.section_id
-                )
+
+            if is_edit_session:
+                old_st = old_status_map.get(item.student_id)
+                # Only notify if status actually changed during this edit/correction
+                if old_st and old_st != st:
+                    if "PRESENT" in st or st in ("PRESENT", "P"):
+                        title = f"Attendance Corrected: Present ({subject_code})" if subject_code else "Attendance Corrected: Present"
+                        message = f"Your attendance for {subject_name} on {date_str} was corrected to Present."
+                        prio = "HIGH"
+                    elif "ABSENT" in st or st in ("ABSENT", "A"):
+                        title = f"Attendance Updated: Absent ({subject_code})" if subject_code else "Attendance Updated: Absent"
+                        message = f"Your attendance for {subject_name} on {date_str} was updated to Absent."
+                        prio = "HIGH"
+                    else:
+                        title = f"Attendance Updated ({subject_code})" if subject_code else "Attendance Updated"
+                        message = f"Your attendance for {subject_name} on {date_str} was updated to on Leave."
+                        prio = "NORMAL"
+
+                    await notify_users(
+                        db=db,
+                        background_tasks=background_tasks,
+                        sender_id=teacher_id,
+                        user_ids=[item.student_id],
+                        title=title,
+                        message=message,
+                        notification_type="ATTENDANCE_ALERT",
+                        priority=prio,
+                        section_id=offering.section_id
+                    )
+            else:
+                # Regular session or pending class marked for the first time
+                if "ABSENT" in st or st in ("ABSENT", "A"):
+                    title = f"Attendance: Absent ({subject_code})" if subject_code else "Attendance: Absent"
+                    message = f"You were marked Absent for {subject_name} on {date_str}."
+                    await notify_users(
+                        db=db,
+                        background_tasks=background_tasks,
+                        sender_id=teacher_id,
+                        user_ids=[item.student_id],
+                        title=title,
+                        message=message,
+                        notification_type="ATTENDANCE_ALERT",
+                        priority="HIGH",
+                        section_id=offering.section_id
+                    )
+                elif "LEAVE" in st or st in ("LEAVE", "L"):
+                    title = f"Attendance: on Leave ({subject_code})" if subject_code else "Attendance: on Leave"
+                    message = f"You were marked on Leave for {subject_name} on {date_str}."
+                    await notify_users(
+                        db=db,
+                        background_tasks=background_tasks,
+                        sender_id=teacher_id,
+                        user_ids=[item.student_id],
+                        title=title,
+                        message=message,
+                        notification_type="ATTENDANCE_ALERT",
+                        priority="NORMAL",
+                        section_id=offering.section_id
+                    )
+                elif "PRESENT" in st or st in ("PRESENT", "P"):
+                    title = f"Attendance: Present ({subject_code})" if subject_code else "Attendance: Present"
+                    message = f"You were marked Present for {subject_name} on {date_str}."
+                    await notify_users(
+                        db=db,
+                        background_tasks=background_tasks,
+                        sender_id=teacher_id,
+                        user_ids=[item.student_id],
+                        title=title,
+                        message=message,
+                        notification_type="ATTENDANCE_ALERT",
+                        priority="LOW",
+                        section_id=offering.section_id
+                    )
     except Exception as exc:
         logger.exception("Failed to dispatch attendance notification")
 
@@ -597,35 +658,66 @@ async def get_teacher_history(
     teacher_id: int = Depends(require_teacher),
     db: AsyncSession = Depends(get_session)
 ):
-    """Fetch a distinct list of past classes this teacher has already submitted."""
-    
-    # Query AttendanceSession instead of AttendanceRecord to access course and teacher data
+    """Fetch past classes this teacher has conducted with aggregated turnout stats."""
+    from sqlalchemy import case
+
+    teacher = await db.get(User, teacher_id)
+    matched_teacher_ids = [teacher_id]
+    if teacher:
+        same_name_ids = (await db.exec(select(User.id).where(User.full_name == teacher.full_name))).all()
+        matched_teacher_ids = list(set(matched_teacher_ids + list(same_name_ids)))
+
     statement = (
         select(
+            AttendanceSession.id.label("session_id"),
             AttendanceSession.course_offering_id,
             AttendanceSession.date,
             AttendanceSession.batch_label,
             Subject.name.label("subject_name"),
-            Section.name.label("section_name")
+            Section.name.label("section_name"),
+            func.count(AttendanceRecord.id).label("total_students"),
+            func.count(case((AttendanceRecord.status == AttendanceStatus.PRESENT, 1))).label("present_count"),
+            func.count(case((AttendanceRecord.status == AttendanceStatus.ABSENT, 1))).label("absent_count"),
         )
         .join(CourseOffering, AttendanceSession.course_offering_id == CourseOffering.id)
         .join(Subject, CourseOffering.subject_id == Subject.id)
         .join(Section, CourseOffering.section_id == Section.id)
-        .where(AttendanceSession.teacher_id == teacher_id)
-        .distinct()
-        .order_by(AttendanceSession.date.desc())
+        .outerjoin(AttendanceRecord, AttendanceSession.id == AttendanceRecord.session_id)
+        .where(
+            AttendanceSession.teacher_id.in_(matched_teacher_ids),
+            AttendanceSession.is_held == True
+        )
+        .group_by(
+            AttendanceSession.id,
+            AttendanceSession.course_offering_id,
+            AttendanceSession.date,
+            AttendanceSession.batch_label,
+            Subject.name,
+            Section.name
+        )
+        .having(func.count(AttendanceRecord.id) > 0)
+        .order_by(AttendanceSession.date.desc(), AttendanceSession.id.desc())
     )
     
     result = await db.exec(statement)
     
     history = []
     for row in result:
+        tot = row.total_students or 0
+        pres = row.present_count or 0
+        absen = row.absent_count or 0
+        pct = round(pres / tot * 100.0, 1) if tot > 0 else 0.0
         history.append(SessionHistoryResponse(
+            session_id=row.session_id,
             course_offering_id=row.course_offering_id,
             date=row.date,
             subject_name=row.subject_name,
             section_name=row.section_name,
-            batch_label=row.batch_label
+            batch_label=row.batch_label,
+            total_students=tot,
+            present_count=pres,
+            absent_count=absen,
+            attendance_percentage=pct
         ))
         
     return history

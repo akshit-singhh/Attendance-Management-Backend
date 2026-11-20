@@ -13,6 +13,7 @@ class SubjectAttendanceHistory(BaseModel):
     percentage: float
     standing: str
     lab_group: Optional[str] = None
+    requires_attendance: bool = True
 
 
 class StudentDashboardResponse(BaseModel):
@@ -76,5 +77,6 @@ class StudentSubjectHistoryResponse(BaseModel):
     periods_attended: int
     percentage: float
     standing: str
+    requires_attendance: bool = True
     sessions: List[StudentClassSessionItem] = []
 

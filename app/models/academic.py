@@ -83,6 +83,7 @@ class Subject(SQLModel, table=True):
     is_elective: bool = Field(default=False)
     credits: int = Field(default=3)
     course_type: Optional[str] = Field(default="LECTURE")
+    requires_attendance: bool = Field(default=True)
 
 class CourseOffering(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
