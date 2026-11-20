@@ -425,7 +425,7 @@ async def sync_offline_attendance(
 
     # 5. Create or Update AttendanceSession
     old_status_map = {}
-    is_edit_session = existing_session is not None
+    is_edit_session = False
     if existing_session:
         target_session = existing_session
         target_session.duration_periods = payload.duration_periods
@@ -448,6 +448,7 @@ async def sync_offline_attendance(
             await db.delete(old_rec)
         await db.commit()
 
+        is_edit_session = len(old_status_map) > 0
         new_session = target_session
     else:
         new_session = AttendanceSession(
@@ -513,8 +514,25 @@ async def sync_offline_attendance(
     await db.commit()
     created_session_id = new_session.id
 
+    subject = await db.get(Subject, offering.subject_id)
+
     # 7. Smart Weekly Auto-Fulfillment for Combined Labs (Approach B)
-    if payload.batch_label in ("ALL", "COMBINED") or len(payload.records) >= len(enrolled_students):
+    # Strictly applicable ONLY to Lab/Practical offerings where faculty explicitly combined batches (batch_label="ALL" or "COMBINED")
+    is_lab_course = (
+        (offering.course_type and offering.course_type.upper() in ("LAB", "PRACTICAL")) or
+        (subject and subject.course_type and subject.course_type.upper() in ("LAB", "PRACTICAL"))
+    )
+    if not is_lab_course:
+        # Check if offering has students mapped to lab groups (G1/G2)
+        has_lab_groups = (await db.exec(
+            select(StudentSubjectMap.id).where(
+                StudentSubjectMap.course_offering_id == payload.course_offering_id,
+                StudentSubjectMap.lab_group.isnot(None)
+            )
+        )).first() is not None
+        is_lab_course = has_lab_groups
+
+    if is_lab_course and payload.batch_label in ("ALL", "COMBINED"):
         try:
             week_start = payload.date - timedelta(days=payload.date.weekday())
             other_tt_stmt = select(TimetableEntry).where(
@@ -564,86 +582,110 @@ async def sync_offline_attendance(
 
     # Dispatch student push notifications in background
     try:
-        subject = await db.get(Subject, offering.subject_id)
         subject_name = subject.name if subject else "Class"
         subject_code = subject.course_code if subject else ""
         date_str = payload.date.strftime("%d %b %Y")
 
-        for item in payload.records:
-            st = item.status.value.upper() if hasattr(item.status, "value") else str(item.status).upper()
-
-            if is_edit_session:
+        if is_edit_session:
+            changed_present = []
+            changed_absent = []
+            changed_leave = []
+            for item in payload.records:
+                st = item.status.value.upper() if hasattr(item.status, "value") else str(item.status).upper()
                 old_st = old_status_map.get(item.student_id)
-                # Only notify if status actually changed during this edit/correction
-                if old_st and old_st != st:
+                if not old_st or old_st != st:
                     if "PRESENT" in st or st in ("PRESENT", "P"):
-                        title = f"Attendance Corrected: Present ({subject_code})" if subject_code else "Attendance Corrected: Present"
-                        message = f"Your attendance for {subject_name} on {date_str} was corrected to Present."
-                        prio = "HIGH"
+                        changed_present.append(item.student_id)
                     elif "ABSENT" in st or st in ("ABSENT", "A"):
-                        title = f"Attendance Updated: Absent ({subject_code})" if subject_code else "Attendance Updated: Absent"
-                        message = f"Your attendance for {subject_name} on {date_str} was updated to Absent."
-                        prio = "HIGH"
+                        changed_absent.append(item.student_id)
                     else:
-                        title = f"Attendance Updated ({subject_code})" if subject_code else "Attendance Updated"
-                        message = f"Your attendance for {subject_name} on {date_str} was updated to on Leave."
-                        prio = "NORMAL"
+                        changed_leave.append(item.student_id)
 
-                    await notify_users(
-                        db=db,
-                        background_tasks=background_tasks,
-                        sender_id=teacher_id,
-                        user_ids=[item.student_id],
-                        title=title,
-                        message=message,
-                        notification_type="ATTENDANCE_ALERT",
-                        priority=prio,
-                        section_id=offering.section_id
-                    )
-            else:
-                # Regular session or pending class marked for the first time
+            if changed_present:
+                await notify_users(
+                    db=db,
+                    background_tasks=background_tasks,
+                    sender_id=teacher_id,
+                    user_ids=changed_present,
+                    title=f"Attendance: Present ({subject_code})" if subject_code else "Attendance: Present",
+                    message=f"Your attendance for {subject_name} on {date_str} is marked Present.",
+                    notification_type="ATTENDANCE_ALERT",
+                    priority="NORMAL",
+                    section_id=offering.section_id
+                )
+            if changed_absent:
+                await notify_users(
+                    db=db,
+                    background_tasks=background_tasks,
+                    sender_id=teacher_id,
+                    user_ids=changed_absent,
+                    title=f"Attendance Updated: Absent ({subject_code})" if subject_code else "Attendance Updated: Absent",
+                    message=f"Your attendance for {subject_name} on {date_str} was updated to Absent.",
+                    notification_type="ATTENDANCE_ALERT",
+                    priority="HIGH",
+                    section_id=offering.section_id
+                )
+            if changed_leave:
+                await notify_users(
+                    db=db,
+                    background_tasks=background_tasks,
+                    sender_id=teacher_id,
+                    user_ids=changed_leave,
+                    title=f"Attendance Updated ({subject_code})" if subject_code else "Attendance Updated",
+                    message=f"Your attendance for {subject_name} on {date_str} was updated to on Leave.",
+                    notification_type="ATTENDANCE_ALERT",
+                    priority="NORMAL",
+                    section_id=offering.section_id
+                )
+        else:
+            absent_ids = []
+            leave_ids = []
+            present_ids = []
+            for item in payload.records:
+                st = item.status.value.upper() if hasattr(item.status, "value") else str(item.status).upper()
                 if "ABSENT" in st or st in ("ABSENT", "A"):
-                    title = f"Attendance: Absent ({subject_code})" if subject_code else "Attendance: Absent"
-                    message = f"You were marked Absent for {subject_name} on {date_str}."
-                    await notify_users(
-                        db=db,
-                        background_tasks=background_tasks,
-                        sender_id=teacher_id,
-                        user_ids=[item.student_id],
-                        title=title,
-                        message=message,
-                        notification_type="ATTENDANCE_ALERT",
-                        priority="HIGH",
-                        section_id=offering.section_id
-                    )
+                    absent_ids.append(item.student_id)
                 elif "LEAVE" in st or st in ("LEAVE", "L"):
-                    title = f"Attendance: on Leave ({subject_code})" if subject_code else "Attendance: on Leave"
-                    message = f"You were marked on Leave for {subject_name} on {date_str}."
-                    await notify_users(
-                        db=db,
-                        background_tasks=background_tasks,
-                        sender_id=teacher_id,
-                        user_ids=[item.student_id],
-                        title=title,
-                        message=message,
-                        notification_type="ATTENDANCE_ALERT",
-                        priority="NORMAL",
-                        section_id=offering.section_id
-                    )
+                    leave_ids.append(item.student_id)
                 elif "PRESENT" in st or st in ("PRESENT", "P"):
-                    title = f"Attendance: Present ({subject_code})" if subject_code else "Attendance: Present"
-                    message = f"You were marked Present for {subject_name} on {date_str}."
-                    await notify_users(
-                        db=db,
-                        background_tasks=background_tasks,
-                        sender_id=teacher_id,
-                        user_ids=[item.student_id],
-                        title=title,
-                        message=message,
-                        notification_type="ATTENDANCE_ALERT",
-                        priority="LOW",
-                        section_id=offering.section_id
-                    )
+                    present_ids.append(item.student_id)
+
+            if absent_ids:
+                await notify_users(
+                    db=db,
+                    background_tasks=background_tasks,
+                    sender_id=teacher_id,
+                    user_ids=absent_ids,
+                    title=f"Attendance: Absent ({subject_code})" if subject_code else "Attendance: Absent",
+                    message=f"You were marked Absent for {subject_name} on {date_str}.",
+                    notification_type="ATTENDANCE_ALERT",
+                    priority="HIGH",
+                    section_id=offering.section_id
+                )
+            if leave_ids:
+                await notify_users(
+                    db=db,
+                    background_tasks=background_tasks,
+                    sender_id=teacher_id,
+                    user_ids=leave_ids,
+                    title=f"Attendance: on Leave ({subject_code})" if subject_code else "Attendance: on Leave",
+                    message=f"You were marked on Leave for {subject_name} on {date_str}.",
+                    notification_type="ATTENDANCE_ALERT",
+                    priority="NORMAL",
+                    section_id=offering.section_id
+                )
+            if present_ids:
+                await notify_users(
+                    db=db,
+                    background_tasks=background_tasks,
+                    sender_id=teacher_id,
+                    user_ids=present_ids,
+                    title=f"Attendance: Present ({subject_code})" if subject_code else "Attendance: Present",
+                    message=f"You were marked Present for {subject_name} on {date_str}.",
+                    notification_type="ATTENDANCE_ALERT",
+                    priority="NORMAL",
+                    section_id=offering.section_id
+                )
     except Exception as exc:
         logger.exception("Failed to dispatch attendance notification")
 

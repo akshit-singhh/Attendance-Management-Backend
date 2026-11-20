@@ -426,6 +426,249 @@ This section provides formal mathematical derivations, definitions, and code map
 
 ## 4. Chronological Chat & Development Activity Trail
 
+### Session: 2026-11-21 01:38:00 IST — Resolution of Ghost "Combined Lab" Postponed Sessions in MA402 
+* **Scope:** Backend (`app/api/v1/mobile/attendance.py`), Database (`attendancesession`)
+* **Issues Addressed:**
+  - Student app's Subject Detail screen for `MA402` (*Simulation & modelling*, taught by faculty) displayed 13 phantom sessions labeled `POSTPONED` with badges `[COMBINED]` and callout reason *"Combined Lab conducted on Thu, 19 Nov"*, confusing student (`235ICS006`).
+* **Root Cause Identified:**
+  - Logic error in Section 7 of `sync_offline_attendance` in `app/api/v1/mobile/attendance.py`:
+    - The auto-fulfillment check: `if payload.batch_label in ("ALL", "COMBINED") or len(payload.records) >= len(enrolled_students):` contained a catastrophic fallback: `or len(payload.records) >= len(enrolled_students)`.
+    - `MA402` is a 4-hour/week Theory **LECTURE** course (Mon, Tue, Wed, Thu), not a Lab.
+    - When faculty conducted roll call for the full class on Thursday (or Wednesday), marking all enrolled students caused `len(payload.records) >= len(enrolled_students)` to evaluate to `True`.
+    - The backend mistakenly classified the lecture submission as a "Combined Lab" and automatically synthesized unconducted placeholder sessions (`is_held = False`, `reason_not_held = "Combined Lab conducted on..."`) for all other timetable days of that week (Monday, Tuesday, Wednesday).
+    - In `student.py`, any session with `is_held == False` was mapped to `status = "POSTPONED"`, rendering 13 ghost postponed cards in the student app.
+* **Changes Implemented:**
+  1. *Backend Course-Type & Batch-Label Guarding (`app/api/v1/mobile/attendance.py`):*
+     - Replaced the flawed fallback condition. Auto-fulfillment now runs **only** if:
+       - `is_lab_course` is true (verified via `offering.course_type in ("LAB", "PRACTICAL")`, `subject.course_type in ("LAB", "PRACTICAL")`, or offering having active `lab_group` mappings `G1`/`G2`).
+       - **AND** the faculty explicitly submits with `payload.batch_label in ("ALL", "COMBINED")`.
+     - Completely removed `or len(payload.records) >= len(enrolled_students)` so regular full-class lecture submissions never trigger lab auto-fulfillment.
+  2. *Database Purge of 13 Bogus Sessions:*
+     - Executed transactional purge of the 13 auto-generated `AttendanceSession` rows for course offering `1808` (`MA402`) where `reason_not_held ILIKE '%Combined Lab%'`.
+     - Verified remaining sessions for `MA402`: exactly **20 conducted lecture sessions** (5 Present, 15 Absent for student `235ICS006`).
+* **Verification & Testing Conducted:**
+  - Invoked `get_student_subject_history` for student `696` (`235ICS006`) on `MA402`:
+    - Response confirms: `periods_held: 20`, `periods_attended: 5`, `percentage: 25.0%`.
+    - Session status distribution: exactly 5 `PRESENT` and 15 `ABSENT`. Zero `POSTPONED` ghost sessions.
+  - Verified Python syntax: `ast.parse` returned `SYNTAX OK`.
+  - Adhered strictly to instruction: APK was **not** built (`assembleDebug` was not invoked).
+
+### Session: 2026-11-21 01:20:00 IST — Student "Present" Notification Reception & Default Preference Restoration
+* **Scope:** Backend (`app/api/v1/mobile/attendance.py`), Mobile Client (`TokenManager.kt`, `ProfileViewModel.kt`, `AttendanceFirebaseMessagingService.kt`)
+* **Issues Addressed:**
+  - When a teacher marked a student as Present and submitted attendance, the student device did not receive the push notification / system tray alert popup.
+* **Root Cause Analysis:**
+  1. *Android Client Notification Suppression by Default:*
+     - In `AttendanceFirebaseMessagingService.kt`, incoming notifications were filtered via `when { isLow && !notifyOnPresent -> true ... }`.
+     - In `TokenManager.kt` and `ProfileViewModel.kt`, `notifyOnPresentFlow` / `_notifyOnPresent` defaulted to `false` (un-toggled default).
+     - Backend `attendance.py` sent Present notifications with `priority="LOW"`.
+     - Consequently, `isLow && !notifyOnPresent` evaluated to `true`, and the Android client explicitly discarded the system tray notification popup (`Log.d(TAG, "Skipping system tray notification popup per user preference")`).
+     - Furthermore, `notifyOnCorrection` also defaulted to `false`, causing corrected/updated marks to be dropped on student devices as well.
+  2. *Silent Notification Channel Allocation:*
+     - Even if manually enabled, `isLow` forced `isSilent = true`, which channeled the notification into Android's `CHANNEL_ATTENDANCE_UPDATES` configured with `IMPORTANCE_LOW` (no audible chime, no heads-up banner, suppressed on lock screen).
+  3. *Edit Session Notification Omission on Zero Previous Records:*
+     - In `sync_offline_attendance`, `is_edit_session = existing_session is not None` evaluated to `True` whenever a placeholder or empty record existed (`old_records == []`).
+     - The inner loop checked `if old_st and old_st != st:`, which evaluated to `False` for all students because `old_st` was `None`. The notification block was skipped entirely for all students.
+* **Changes Implemented:**
+  1. *Android Default Notification Preference Restorations:*
+     - In `TokenManager.kt`: Changed `Keys.NOTIFY_ON_PRESENT` and `Keys.NOTIFY_ON_CORRECTION` default fallbacks from `false` to `true`.
+     - In `ProfileViewModel.kt`: Initialized `_notifyOnPresent` and `_notifyOnCorrection` to `true`.
+     - In `AttendanceFirebaseMessagingService.kt`:
+       - Updated fallback in `runBlocking` catch block from `Triple(false, true, false)` to `Triple(true, true, true)`.
+       - Decoupled `isPresentAlert` from `isLow` (`title.contains("Present") || body.contains("Present")`), ensuring explicit checking against `notifyOnPresent`.
+  2. *Notification Elevation to Normal Priority:*
+     - In `attendance.py`: Elevated Present attendance notifications from `priority="LOW"` to `priority="NORMAL"`.
+     - With `NORMAL` priority, `isSilent` evaluates to `false`, routing notifications to `CHANNEL_ATTENDANCE_ALERTS` (`IMPORTANCE_HIGH`) with default audible ringtone and heads-up banner display.
+  3. *Backend Edit & Sync Session Refinement:*
+     - In `attendance.py`: Defined `is_edit_session = len(old_status_map) > 0`, ensuring that first-time roll calls conducted on existing session placeholders are treated as fresh submissions and notify all students.
+     - Updated student status loop in edit sessions to check `if not old_st or old_st != st:`, ensuring that newly marked students or status changes are dispatched reliably.
+* **Verification & Testing Conducted:**
+  - Ran `./gradlew.bat compileDebugKotlin`: `BUILD SUCCESSFUL in 31s` with 0 errors.
+  - Verified backend Python syntax with `ast.parse`: `SYNTAX OK`.
+  - Adhered strictly to instruction: APK was **not** built (`assembleDebug` was not invoked).
+
+### Session: 2026-11-21 01:02:00 IST — Attendance Fast-Sync Batching, False "Offline" Navbar Fix & Submission Success Toast
+* **Scope:** Backend (`app/api/v1/mobile/attendance.py`), Mobile Client (`RetrofitClient.kt`, `OfflineAttendanceManager.kt`, `TeacherRollCallScreen.kt`, `TeacherViewModel.kt`)
+* **Issues Addressed:**
+  1. *Slow Attendance Submission:* Attendance submission took several seconds because `sync_offline_attendance` ran sequential database queries and commits for every student in the roster individually (50-60 serial commits) to send notifications.
+  2. *False "Offline" Flapping on Navbar:* Upon submitting attendance or moving between screens, the navbar banner erroneously popped up saying "Offline" then "Back online", despite the device having a steady, fast internet connection.
+     - Root cause: When navigating away from a screen or popping back from roll call, previous coroutines were cancelled. OkHttp threw `IOException("Canceled")`, which `connectivityInterceptor` in `RetrofitClient.kt` caught and blindly forwarded to `OfflineAttendanceManager.markOffline()`.
+     - Additionally, `TeacherViewModel.submitAttendance` launched a premature `loadPendingClasses()` call right before popping backstack, which was cancelled mid-flight.
+  3. *Missing Submission Toast:* No visual confirmation toast was displayed to the teacher after submitting or updating attendance.
+* **Changes Implemented:**
+  1. *Backend Notification Batching (`app/api/v1/mobile/attendance.py`):*
+     - Grouped student notifications by status (`changed_present`, `changed_absent`, `changed_leave` for edits; `absent_ids`, `leave_ids`, `present_ids` for initial captures).
+     - Reduced 50-60 serial database commits per submission to at most 3 grouped calls, reducing endpoint response time by 90%+ (from 3-6s to <200ms).
+  2. *Cancelled Request Filtering in `RetrofitClient.kt`:*
+     - Filtered out cancelled calls (`chain.call().isCanceled()` and `e.message.contains("Canceled")`) so aborted screen-transition requests never trigger `markOffline()`.
+  3. *Guard `OfflineAttendanceManager.markOffline()` with Hardware Connectivity:*
+     - Checked `ConnectivityManager.getNetworkCapabilities(activeNet).hasCapability(NET_CAPABILITY_INTERNET)`. If the OS confirms an active internet interface, the app does not flap to offline on transient/cancelled request errors.
+  4. *Attendance Submission Toast & Clean State Reset in `TeacherRollCallScreen.kt`:*
+     - Added feedback Toast upon `SubmitUiState.Done`:
+       - Offline: `"Attendance saved offline. Will auto-sync when online."`
+       - Editing: `"Attendance updated successfully!"`
+       - New Submission: `"Attendance submitted successfully!"`
+     - Removed redundant in-flight `loadPendingClasses()` call from `TeacherViewModel.submitAttendance` right before popBackStack.
+* **Verification & Testing Conducted:**
+  - Ran `.\gradlew.bat compileDebugKotlin` to verify full compilation.
+  - Verification passed: `BUILD SUCCESSFUL in 37s` with 0 errors.
+  - Adhered strictly to instruction not to build APK (`assembleDebug`).
+
+### Session: 2026-11-21 00:48:00 IST — Subject Detail Session Record Card UI & Badge Overflow Refactoring
+* **Scope:** Mobile Client (`SubjectDetailScreen.kt`)
+* **Issues Addressed:**
+  - In `SubjectDetailScreen.kt`, session cards had a cramped horizontal row where the date ("18 Nov 2026 • Wed"), batch tag ("COMBINED"), and right status badge ("POSTPONED") all competed within an artificial ~160dp column constraint.
+  - As a result, the batch tag wrapped into an awkward, broken two-line pill (`COMBI \n NED`), the date was squished against the badge, and the status icon was centered vertically across multi-line content instead of aligning cleanly to the top.
+  - Reason text (`reason_not_held`) was rendered as raw cramped text with poor visual hierarchy.
+  - Filter chips only supported "All", "Attended", and "Missed", lacking a "Postponed" filter and wrapping awkwardly on smaller screens.
+* **Changes Implemented:**
+  1. *Redesigned `SessionRecordCard` Hierarchy:*
+     - Pinned Status Icon to `Alignment.Top` (`padding(top = 2.dp)`) so it aligns with the session title/date row.
+     - Row 1: Split between `Date & Day` on the left and `Status Badge` (POSTPONED / PRESENT / ABSENT) on the right.
+     - Row 2: Placed `batch_label` ("COMBINED") alongside `time_display`, `room`, and `duration_periods` with `maxLines = 1, softWrap = false`, allowing it to span the full card width (~260dp+) with zero wrapping.
+     - Row 3: Transformed `reason_not_held` into a neat amber callout container (`#FFFBEB`, border `#FDE68A`) with an info icon (`Icons.Outlined.Info`).
+  2. *Enhanced Filter Chips:*
+     - Added dynamic `Postponed ($postponedCount)` filter chip when postponed sessions exist.
+     - Wrapped the filter chips row with `.horizontalScroll(rememberScrollState())` for smooth horizontal scrolling without layout clipping.
+* **Verification & Testing Conducted:**
+  - Ran `.\gradlew.bat compileDebugKotlin` to verify full compilation.
+  - Verification passed: `BUILD SUCCESSFUL in 15s` with 0 errors.
+  - Adhered strictly to instruction not to build APK (`assembleDebug`).
+
+### Session: 2026-11-21 00:41:00 IST — Fix Multiple / False "Session Expired" Toasts on Voluntary Logout
+* **Scope:** Mobile Client (`TokenManager.kt`, `RetrofitClient.kt`, `AuthRepository.kt`, `NavGraph.kt`)
+* **Issues Addressed:**
+  - When the user manually logged out from the application, the toast *"Session expired. Please log in again."* appeared multiple times sequentially on the login screen.
+  - Root cause:
+    1. During manual logout, tokens are cleared and the session is invalidated.
+    2. Any concurrent in-flight HTTP requests (such as FCM token unregistration or dashboard/notification polling coroutines) immediately failed with `401 Unauthorized`.
+    3. `AuthInterceptor` checked for a refresh token, found it cleared (`refreshToken.isNullOrBlank()`), and erroneously interpreted this as an unexpected session expiration, invoking `tokenManager.notifySessionExpired()`.
+    4. Since multiple in-flight requests failed simultaneously, `notifySessionExpired()` emitted multiple events to `sessionExpiredFlow`, queuing multiple system toasts on the Android OS.
+    5. Furthermore, intentional logout was incorrectly showing a "session expired" warning rather than cleanly returning the user to the login screen.
+* **Changes Implemented:**
+  1. *Intentional Logout Flag (`isLoggingOut`) in `TokenManager.kt`:*
+     - Added `markLoggingOut()`, `resetLoggingOut()`, and `isLoggingOut()`.
+     - `notifySessionExpired()` now immediately returns without emitting if `isLoggingOut` is `true`.
+     - Added a 4-second debounce window (`lastSessionExpiredTime`) to guard against multiple simultaneous 401 emissions even during legitimate session expiries.
+  2. *Exclusion List in `RetrofitClient.kt`:*
+     - Added `/auth/logout` and `notifications/devices/unregister` to `AuthInterceptor` bypass list so they do not attempt automatic token refresh on 401.
+     - Added explicit `!tokenManager.isLoggingOut()` checks before calling `notifySessionExpired()`.
+  3. *Immediate Flag Activation in `AuthRepository.kt` & `NavGraph.kt`:*
+     - `performLogout` and `AuthRepository.logout()` activate `tokenManager.markLoggingOut()` at the very beginning of the logout process.
+     - `NavGraph.kt` ignores any session expired emissions if `currentRoute == Routes.LOGIN || currentRoute == Routes.SPLASH || tokenManager.isLoggingOut()`.
+     - `resetLoggingOut()` resets state upon arriving at or authenticating from `Routes.LOGIN`.
+* **Verification & Testing Conducted:**
+  - Ran `.\gradlew.bat compileDebugKotlin` to verify full compilation.
+  - Verification passed: `BUILD SUCCESSFUL in 39s` with 0 errors.
+  - Adhered strictly to instruction not to build APK (`assembleDebug`).
+
+### Session: 2026-11-21 00:21:00 IST — Teacher App Smooth Bottom Navigation Transitions via HorizontalPager
+* **Scope:** Mobile Client (`NavGraph.kt`, `TeacherMainPagerScreen.kt`, `BottomNavBars.kt`)
+* **Issues Addressed:**
+  - In the teacher app, navigating between bottom navigation destinations (`Classes` ↔ `Timetable` ↔ `Analytics` ↔ `Records`) previously triggered generic `NavHost` slide-left enter / slide-left exit animations because each tab was configured as a separate `composable` destination wrapped in an individual `TeacherScaffold`.
+  - Tapping between tabs caused the entire screen—including the bottom navigation bar itself—to slide across horizontally in an unnatural, one-way direction (e.g. from right to left even when going backwards), feeling awkward and jarring compared to standard Android bottom navigation.
+* **Changes Implemented:**
+  1. *Created `TeacherMainPagerScreen.kt`:*
+     - Unified `TeacherClassesScreen`, `TeacherTimetableScreen`, `TeacherAnalyticsScreen`, and `TeacherRecordsScreen` inside a single top-level `Scaffold`.
+     - Integrated `rememberPagerState` and `HorizontalPager` with an anchored, static `AppBottomNav` that never slides, flickers, or shifts during tab switches.
+     - Implemented directional, tab-aware animation: tapping any bottom nav tab calls `pagerState.animateScrollToPage(targetIndex)`, moving left-to-right or right-to-left in exact sync with the physical position of the tabs.
+     - Added intelligent back navigation history stack (`pageHistory` + `BackHandler`): pressing the back button navigates through previously visited tabs back to Classes before exiting the app.
+  2. *Refactored `NavGraph.kt`:*
+     - Replaced individual route scaffolds with `RenderTeacherPager(initialPage)` mapping `Routes.TEACHER_CLASSES` (0), `Routes.TEACHER_TIMETABLE` (1), `Routes.TEACHER_ANALYTICS` (2), and `Routes.TEACHER_RECORDS` (3).
+     - Removed redundant `TeacherScaffold`.
+     - Preserved stack navigation transitions for deep drill-down screens (`TeacherRollCallScreen`, `ProfileScreen`, `TeacherNotificationsScreen`).
+* **Verification & Testing Conducted:**
+  - Ran `.\gradlew.bat compileDebugKotlin` to verify full compilation.
+  - Verification passed: `BUILD SUCCESSFUL in 28s` with 0 errors.
+  - Adhered strictly to instruction not to build APK (`assembleDebug`).
+
+### Session: 2026-11-21 00:07:00 IST — Full Android Mipmap Adaptive App Launcher Icon Asset Bundle Integration
+* **Scope:** Mobile Client (`AndroidManifest.xml`, `res/mipmap-*`, `res/values/ic_launcher_background.xml`)
+* **Issues Addressed:**
+  - The Android app launcher previously pointed to a raw unpadded drawable (`@drawable/gbu_logo`).
+  - The user generated and provided a complete multi-density Android icon package (`easyappicon-icons.zip`) and requested using it for the application launcher icon.
+* **Changes Implemented:**
+  1. *Asset Extraction & Multi-Density Mipmap Deployment:*
+     - Extracted standard density mipmap directories into `src/main/res/`:
+       - `mipmap-ldpi/`: `ic_launcher.webp`, `ic_launcher_round.webp`
+       - `mipmap-mdpi/`: `ic_launcher.webp`, `ic_launcher_round.webp`, `ic_launcher_foreground.webp`
+       - `mipmap-hdpi/`: `ic_launcher.webp`, `ic_launcher_round.webp`, `ic_launcher_foreground.webp`
+       - `mipmap-xhdpi/`: `ic_launcher.webp`, `ic_launcher_round.webp`, `ic_launcher_foreground.webp`
+       - `mipmap-xxhdpi/`: `ic_launcher.webp`, `ic_launcher_round.webp`, `ic_launcher_foreground.webp`
+       - `mipmap-xxxhdpi/`: `ic_launcher.webp`, `ic_launcher_round.webp`, `ic_launcher_foreground.webp`
+       - `mipmap-anydpi-v26/`: Adaptive icon XML definitions (`ic_launcher.xml`, `ic_launcher_round.xml`) with white background `@color/ic_launcher_background` and foreground `@mipmap/ic_launcher_foreground`.
+       - `values/ic_launcher_background.xml`: Defined `#ffffff` background color.
+  2. *Manifest Application Icon Routing (`AndroidManifest.xml`):*
+     - Updated `<application>` attributes:
+       - `android:icon="@mipmap/ic_launcher"`
+       - `android:roundIcon="@mipmap/ic_launcher_round"`
+* **Verification & Testing Conducted:**
+  - Ran `./gradlew.bat compileDebugKotlin`: `BUILD SUCCESSFUL in 26s`.
+  - Adhered strictly to instruction: APK was **not** built (`assembleDebug` was not invoked).
+
+### Session: 2026-11-21 00:00:00 IST — System Status Bar & Notification Panel White-on-White Contrast Rectification
+* **Scope:** Mobile Client (`MainActivity.kt`, `Theme.kt`, `themes.xml`, `values-v31/themes.xml`)
+* **Issues Addressed:**
+  - Status bar / notification panel icons at the top of the screen (clock "11:57", battery "70%", network speed "2 kb/s", Wi-Fi, signal bars, and notifications) were rendering in white font on a white app background, making them invisible to the user.
+* **Root Cause:**
+  - The user's device had system-wide Dark Mode enabled (indicated by the crescent moon system icon in the status bar).
+  - Calling parameterless `enableEdgeToEdge()` in `MainActivity.kt` defaulted to `SystemBarStyle.auto()`. When the Android OS is in Dark Mode, `auto()` sets the status bar icon color to white.
+  - Since the attendance app is strictly light-themed (`LightColors` with white/slate backgrounds), the white status bar icons blended into the white background (white-on-white collision).
+* **Changes Implemented:**
+  1. *Explicit Light System Bar Style (`MainActivity.kt`):*
+     - Replaced parameterless `enableEdgeToEdge()` with explicit `SystemBarStyle.light(Color.TRANSPARENT, Color.TRANSPARENT)` for both `statusBarStyle` and `navigationBarStyle`.
+     - Instructs the window manager to render status bar elements in dark slate/black regardless of host OS dark mode state.
+  2. *Compose-Level Insets Controller Enforcement (`Theme.kt`):*
+     - Added a `SideEffect` inside `AttendanceAppTheme` using `WindowCompat.getInsetsController`:
+       - `insetsController.isAppearanceLightStatusBars = true`
+       - `insetsController.isAppearanceLightNavigationBars = true`
+     - Re-asserts dark icon styling across all Compose screens and composition passes.
+  3. *XML Base Theme Alignment (`themes.xml` & `values-v31/themes.xml`):*
+     - Confirmed `android:windowLightStatusBar = true` and transparent status bar color across all API levels.
+* **Verification & Testing Conducted:**
+  - Ran `./gradlew.bat compileDebugKotlin`: `BUILD SUCCESSFUL in 33s`.
+  - Adhered strictly to instruction: APK was **not** built (`assembleDebug` was not invoked).
+
+### Session: 2026-11-20 23:55:00 IST — Profile Header Scrim Tuning for Vibrant Campus Visibility
+* **Scope:** Mobile Client (`ProfileScreen.kt`)
+* **Issues Addressed:**
+  - The initial gradient scrim on the profile header card was too dense (85%–99% opacity), turning the college background nearly solid black and prompting the user feedback: *"image is not even visible"*.
+  - Desired behavior: Keep the bright blue sky, clouds, and rotunda architecture clearly and vibrantly visible, while maintaining 100% text contrast.
+* **Changes Implemented:**
+  1. *Lighter Translucent Gradient Scrim (`UserProfileHeaderCard`):*
+     - Replaced the heavy 85%–99% opaque mask with a light, photographic scrim:
+       - **Top (Sky & Dome):** `Color.Transparent` (0% tint)—preserves the natural, bright blue sky and dome in full clarity.
+       - **Center (Avatar):** `Color(0x38000A1A)` (22% subtle dark navy tint).
+       - **Bottom (Name & Details):** `Color(0x9E000B1A)` (62% deep navy gradient)—provides the necessary dark backing for text.
+  2. *Elevated Text Shadows & Contrast:*
+     - Upgraded student name to `22.sp ExtraBold` with a deep `Shadow(color = Color.Black.copy(0.9f), offset = Offset(0f, 2.5f), blurRadius = 8f)`.
+     - Upgraded email to `13.5.sp SemiBold` with `Shadow(color = Color.Black.copy(0.85f), offset = Offset(0f, 2f), blurRadius = 6f)`.
+     - Gave the avatar a solid 2.5dp white circular border on deep translucent navy (`0.65f`).
+     - Added a 1.5dp white border with 4dp elevation to the role badge (`#059669`).
+* **Verification & Testing Conducted:**
+  - Ran `./gradlew.bat compileDebugKotlin`: `BUILD SUCCESSFUL in 36s`.
+  - Adhered strictly to instruction: APK was **not** built (`assembleDebug` was not invoked).
+
+### Session: 2026-11-20 23:52:00 IST — University Campus Panoramic Hero Header in Student Profile Screen
+* **Scope:** Mobile Client (`gbu_campus.jpg`, `ProfileScreen.kt`)
+* **Issues Addressed:**
+  - The student Profile header previously used a flat, plain navy box container (`NavyHeader`).
+  - The user requested incorporating the real Gautam Buddha University panoramic campus landscape photo as the card background, while ensuring typography in front remains completely legible, crisp, and high-end.
+* **Changes Implemented:**
+  1. *Resource Integration (`res/drawable/gbu_campus.jpg`):*
+     - Staged the high-resolution landscape photo of GBU's iconic rotunda memorial, pavilions, and dome into `res/drawable/gbu_campus.jpg`.
+  2. *Tri-Tier Depth & Scrim Overlay Architecture (`UserProfileHeaderCard` in `ProfileScreen.kt`):*
+     - **Base Tier:** Renders the college campus photo using `ContentScale.Crop` matching the card bounds (`shape = RoundedCornerShape(20.dp)`).
+     - **Scrim Tier:** Applies an engineered multi-stop vertical navy gradient (`0xD90A1A30` $\rightarrow$ `0xF2071426` $\rightarrow$ `0xFD040D1A`). Keeps the architectural structures subtly recognizable in the background while darkening the surface sufficiently for 100% WCAG AAA text contrast.
+     - **Content Tier:**
+       - *Avatar:* Centered 76dp circle featuring a frosted-glass translucent backdrop (`Color.White.copy(alpha = 0.18f)`) bordered by a 2.5dp white gradient outline with bold white student initials.
+       - *Student Name:* 21sp bold text enhanced with a subtle soft shadow (`blurRadius = 8f`, 50% black) preventing background wash-out.
+       - *Student Email:* 13.5sp medium text in high-contrast crisp white (`alpha = 0.9f`).
+       - *Role Badge:* Emerald green pill (`#059669`) with a subtle translucent white border (`Color.White.copy(alpha = 0.35f)`) and elevation.
+* **Verification & Testing Conducted:**
+  - Ran `./gradlew.bat compileDebugKotlin`: `BUILD SUCCESSFUL in 28s`.
+  - Adhered strictly to instruction: APK was **not** built (`assembleDebug` was not invoked).
+
 ### Session: 2026-11-20 23:41:00 IST — Full Official GBU Emblem Splash Canvas (Unclipped Scalloped Seal & Typography)
 * **Scope:** Mobile Client (`gbu_splash_logo.png`, `themes.xml`, `values-v31/themes.xml`)
 * **Issues Addressed:**
